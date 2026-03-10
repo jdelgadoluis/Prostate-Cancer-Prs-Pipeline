@@ -1,0 +1,10 @@
+Archivo	Build
+==================================================
+NG1KD93JZZ.vcf.gz	GRCh38
+nebulaL_freebayes.vcf.gz	GRCh38
+uk0C72FF.pass.recode.vcf.gz	GRCh37
+uk1097F9.pass.recode.vcf.gz	GRCh37
+uk174659.pass.recode.vcf.gz	GRCh37
+uk2DF242.pass.recode.vcf.gz	GRCh37
+uk35C650.pass.recode.vcf.gz	GRCh37
+uk4CA868.pass.recode.vcf.gz	GRCh37

@@ -10,7 +10,7 @@ from time import sleep
 from collections import Counter
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 NCBI_API_KEY = None  # Get API key from https://www.ncbi.nlm.nih.gov/account/settings/ and set it here for faster access to dbSNP API (optional)
 
@@ -45,7 +45,7 @@ def read_vcf_builds(builds_file="vcf_builds.txt"):
 
 def search_all_pgs_files(folder_base="00_pgs_scores"):
     """
- Searches all the .txt.gz files in the folder and subfolders
+ Searches all the .txt files in the folder and subfolders (also supports .txt.gz for backwards compatibility)
     """
     found_files = []
     
@@ -57,7 +57,7 @@ def search_all_pgs_files(folder_base="00_pgs_scores"):
     
     for root, dirs, files in os.walk(folder_base):
         for file in files:
-            if file.endswith('.txt.gz'):
+            if file.endswith('.txt') or file.endswith('.txt.gz'):
                 complete_path = str(Path(root) / file)
                 found_files.append(complete_path)
                 print(f" ✓ {complete_path}")
@@ -196,17 +196,30 @@ def detect_build_file(gz_file):
     
     # If it is not in the path, read file metadata
     try:
-        with gzip.open(gz_file, 'rt') as f:
-            for line in f:
-                if line.startswith('#'):
-                    if 'genome_build=' in line:
-                        build = line.split('=')[1].strip()
-                        if 'GRCh38' in build or 'hg38' in build:
-                            return 'GRCh38'
-                        elif 'GRCh37' in build or 'hg19' in build:
-                            return 'GRCh37'
-                else:
-                    break
+        if gz_file.endswith('.gz'):
+            with gzip.open(gz_file, 'rt') as f:
+                for line in f:
+                    if line.startswith('#'):
+                        if 'genome_build=' in line:
+                            build = line.split('=')[1].strip()
+                            if 'GRCh38' in build or 'hg38' in build:
+                                return 'GRCh38'
+                            elif 'GRCh37' in build or 'hg19' in build:
+                                return 'GRCh37'
+                    else:
+                        break
+        else:
+            with open(gz_file, 'r') as f:
+                for line in f:
+                    if line.startswith('#'):
+                        if 'genome_build=' in line:
+                            build = line.split('=')[1].strip()
+                            if 'GRCh38' in build or 'hg38' in build:
+                                return 'GRCh38'
+                            elif 'GRCh37' in build or 'hg19' in build:
+                                return 'GRCh37'
+                    else:
+                        break
     except:
         pass
     
@@ -215,11 +228,17 @@ def detect_build_file(gz_file):
 
 def load_study(gz_file): 
     """
-    Loads study and extracts metadata including build
+    Loads study and extracts metadata including build. Supports both .txt.gz and .txt files.
     """
     metadata = {}
     
-    with gzip.open(gz_file, 'rt') as f:
+    # Determine if file is gzipped or plain text
+    if gz_file.endswith('.gz'):
+        f = gzip.open(gz_file, 'rt')
+    else:
+        f = open(gz_file, 'r')
+    
+    try:
         complete_lines = f.readlines()
         
         for line in complete_lines:
@@ -230,17 +249,22 @@ def load_study(gz_file):
                     metadata['pgs_name'] = line.split('=', 1)[1].strip()
                 elif 'citation=' in line:
                     citation = line.split('=', 1)[1].strip()
+                    # Extract author more robustly
                     if ' et al' in citation:
                         autor = citation.split(' et al')[0].strip()
+                    elif ',' in citation:
+                        autor = citation.split(',')[0].strip()
                     else:
-                        autor = citation.split()[0].strip()
-                    metadata['autor_principal'] = autor
+                        autor = citation.split()[0].strip() if citation else 'Unknown'
+                    metadata['main_author'] = autor
                 elif 'trait_reported=' in line:
                     metadata['trait'] = line.split('=', 1)[1].strip()
                 elif 'genome_build=' in line:
                     metadata['genome_build'] = line.split('=')[1].strip()
         
         lineas_datos = [l for l in complete_lines if not l.startswith('#')]
+    finally:
+        f.close()
     
     from io import StringIO
     df = pd.read_csv(StringIO(''.join(lineas_datos)), sep='\t')

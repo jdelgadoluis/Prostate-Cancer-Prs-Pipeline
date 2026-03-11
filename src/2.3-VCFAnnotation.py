@@ -3,7 +3,7 @@ import sys
 import subprocess
 import os
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 
 def read_vcf_builds(file_builds=None):
@@ -210,7 +210,7 @@ def anotate_rsid_correct_final(vcf_file, dbsnp_file, output_dir):
         return None
 
 
-def anotate_all_with_dbsnp_correct(input_dir=None, output_dir=None, archivo_builds=None):
+def anotate_all_with_dbsnp_correct(input_dir=None, output_dir=None, file_builds=None):
     """
  Annotate the files using the correct dbSNP file according to the genome build
     """

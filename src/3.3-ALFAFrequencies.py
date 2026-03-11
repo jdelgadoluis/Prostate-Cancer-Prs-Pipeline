@@ -11,7 +11,7 @@ import glob
 from collections import Counter
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 
 def read_metadata_file(archivo_tsv):
@@ -341,9 +341,9 @@ def verify_and_obtain_frequencies(df, max_test=None):
             without_freq = without_freq.head(max_test)
     
     results = {
-        'verified_ok': 0,
+        'verified_correctly': 0,
         'verified_discrepancy': 0,
-        'verified_no_alfa': 0,
+        'verified_without_alfa': 0,
         'new_obtained': 0,
         'new_not_found': 0
     }
@@ -366,7 +366,7 @@ def verify_and_obtain_frequencies(df, max_test=None):
                 diff = abs(original - alfa)
                 
                 if diff < 0.02:  # Difference < 2%
-                    results['verified_ok'] += 1
+                    results['verified_correctly'] += 1
                     df.at[idx, 'af_source'] = freq_alfa.get('source', 'verified')
                 else:
                     results['verified_discrepancy'] += 1
@@ -380,7 +380,7 @@ def verify_and_obtain_frequencies(df, max_test=None):
                     })
                     print(f" Discrepancy {row['rsID']}: Original={original:.4f}, ALFA={alfa:.4f}, Δ={diff:.4f} → UPDATED")
             else:
-                results['verified_no_alfa'] += 1
+                results['verified_without_alfa'] += 1
             
             # Rate limiting
             if NCBI_API_KEY:
@@ -393,7 +393,7 @@ def verify_and_obtain_frequencies(df, max_test=None):
             if i % 10 == 0:
                 elapsed = (datetime.now() - start_time).total_seconds()
                 rate = i / elapsed if elapsed > 0 else 0
-                print(f" Verified {i}/{len(with_freq)} | OK: {results['verified_ok']} | Discrepancies: {results['verified_discrepancy']} | Speed: {rate:.1f} var/s")
+                print(f" Verified {i}/{len(with_freq)} | OK: {results['verified_correctly']} | Discrepancies: {results['verified_discrepancy']} | Speed: {rate:.1f} var/s")
         
         print(f"\n✓ Verification completed in {(datetime.now() - start_time).total_seconds()/60:.1f} min")
     
@@ -503,7 +503,7 @@ def verify_and_obtain_frequencies(df, max_test=None):
     print(f" Without data in studies: {results['verified_without_alfa']}")
     print(f"\nRetrieval of new frequencies:")
     print(f" Obtained: {results['new_obtained']}")
-    print(f" Not found: {results['new_no_found']}")
+    print(f" Not found: {results['new_not_found']}")
     print(f"\nCleanup of variants:")
     print(f" Removed without data: {results.get('removed_without_data', 0)}")
     print(f" Removed frequency=0: {results.get('removed_freq_cero', 0)}")
@@ -602,13 +602,13 @@ def process_frequencies_multiple_studies(*files_tsv, max_test=None, destination_
         print(f" With frequency: {with_freq} ({with_freq/len(df_final)*100:.1f}%)")
         print(f" Without frequency: {without_freq} ({without_freq/len(df_final)*100:.1f}%)")
         
-        if 'verified_ok' in results:
-            print(f" Verified OK: {results['verified_ok']}")
+        if 'verified_correctly' in results:
+            print(f" Verified OK: {results['verified_correctly']}")
             print(f" Discrepancies: {results['verified_discrepancy']}")
         
         if 'new_obtained' in results:
             print(f" Newly obtained: {results['new_obtained']}")
-            print(f" Not found: {results['new_no_found']}")
+            print(f" Not found: {results['new_not_found']}")
         
         print(f" Sources of frequencies:")
         for source, count in df_final['af_source'].value_counts().items():

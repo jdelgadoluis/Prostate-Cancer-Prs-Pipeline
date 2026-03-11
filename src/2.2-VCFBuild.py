@@ -4,7 +4,7 @@ import pysam
 import os
 import glob
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 
 def detect_build(vcf_path):

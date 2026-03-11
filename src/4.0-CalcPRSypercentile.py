@@ -11,7 +11,7 @@ from datetime import datetime
 from collections import Counter
 from itertools import combinations
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 # ==============================================================================
 # Paths
@@ -1058,9 +1058,9 @@ def process_all():
     pgs_per_build = group_pgs_per_build(pgs_files)
     
     print(f"\n Summary of PGS files  by build:")
-    for build, list in pgs_per_build.items():
-        if list:
-            print(f" {build}: {len(list)} files")
+    for build, pgs_list in pgs_per_build.items():
+        if pgs_list:
+            print(f" {build}: {len(pgs_list)} files")
     
     
     # 5. File summary
@@ -1188,7 +1188,7 @@ def process_all():
         if variant_stats:
             print(f" ✓ Variants saved: {variant_stats['total_variants']}")
             
-            variant_stats.append({
+            stats_variants.append({
                 'VCF': vcf_name,
                 'PGS': pgs_name,
                 **variant_stats

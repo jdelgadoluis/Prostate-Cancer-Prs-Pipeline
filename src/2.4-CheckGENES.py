@@ -9,7 +9,7 @@ from tqdm import tqdm
 import time
 import re
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 # ============================================================================
 # Configuration

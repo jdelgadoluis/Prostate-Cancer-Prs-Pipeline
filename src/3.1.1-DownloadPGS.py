@@ -2,9 +2,10 @@ from pathlib import Path
 import sys
 import requests
 import os
+import gzip
 from collections import Counter
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 def read_pgs_from_studies(file_studies=BASE_DIR / "PGSstudies.txt"):
     pgs_ids = []
@@ -22,6 +23,20 @@ def read_pgs_from_studies(file_studies=BASE_DIR / "PGSstudies.txt"):
                 if pgs_part.startswith("PGS"):
                     pgs_ids.append(pgs_part)
     return pgs_ids
+
+def decompress_gzip_file(gz_file_path):
+    """Decompress .txt.gz to .txt and remove the .gz file."""
+    try:
+        txt_file_path = str(gz_file_path).replace(".gz", "")
+        with gzip.open(gz_file_path, "rb") as f_in:
+            with open(txt_file_path, "wb") as f_out:
+                f_out.write(f_in.read())
+        os.remove(gz_file_path)
+        print(f" Decompressed: {os.path.basename(txt_file_path)}")
+        return txt_file_path
+    except Exception as e:
+        print(f" Error decompressing {os.path.basename(gz_file_path)}: {e}")
+        return None
 
 def read_builds_vcf(file_builds=BASE_DIR / "vcf_builds.txt"):
     vcf_builds = {}
@@ -133,8 +148,19 @@ def download_pgs_harmonized(pgs_ids, builds_info=None, destination_folder="pgs_s
                             if chunk:
                                 f.write(chunk)
                 
-                print(f" Saved in: {filename}\n")
-                downloaded[build_target].append(filename)
+                print(f" Saved in: {filename}")
+
+                if filename.endswith(".gz"):
+                    decompressed_file = decompress_gzip_file(filename)
+                    if decompressed_file:
+                        downloaded[build_target].append(decompressed_file)
+                    else:
+                        print(f" Warning: Could not decompress {os.path.basename(filename)}\n")
+                        downloaded[build_target].append(filename)
+                else:
+                    downloaded[build_target].append(filename)
+                
+                print()
             
             except requests.exceptions.HTTPError as e:
                 print(f" HTTP Error  with {pgs_id}: {e}\n")

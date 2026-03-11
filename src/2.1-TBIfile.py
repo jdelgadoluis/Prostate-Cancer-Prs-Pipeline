@@ -6,9 +6,12 @@ import subprocess
 import gzip
 import shutil
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
+
+print(f"Base directory: {BASE_DIR}")
 
 VCF_FOLDER = BASE_DIR / "vcf_files"
+USED_FOLDER = VCF_FOLDER / "used"
 
 def check_vcf_order(vcf_path):
     """Verify if VCF is sorted by CHROM/POS"""
@@ -44,15 +47,34 @@ def sort_and_index_vcf(vcf_path):
         print(f"❌ Exception {base_name}: {e}")
         return False
 
+
+def move_used_original(vcf_path, used_folder=USED_FOLDER):
+    """Move processed original VCF to used/ folder (only non-_sorted files)."""
+    file_name = os.path.basename(vcf_path)
+    if "_sorted" in file_name:
+        return False
+
+    Path(used_folder).mkdir(parents=True, exist_ok=True)
+    destination = Path(used_folder) / file_name
+
+    try:
+        shutil.move(vcf_path, destination)
+        print(f"📦 Moved to used/: {file_name}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Could not move {file_name} to used/: {e}")
+        return False
+
 def process_all_vcfs(vcf_folder):
     """Processes All the VCF.gz"""
-    vcf_files = glob.glob(str(Path(vcf_folder) / "*.vcf.gz"))
+    all_vcf_files = glob.glob(str(Path(vcf_folder) / "*.vcf.gz"))
+    vcf_files = [f for f in all_vcf_files if "_sorted" not in os.path.basename(f)]
     
     if not vcf_files:
         print("❌ There are no .vcf.gz in the folder")
         return
     
-    print(f"📁 Processing {len(vcf_files)} files VCF.gz\n")
+    print(f"📁 Processing {len(vcf_files)} original VCF.gz (without _sorted)\n")
     
     success = 0
     for vcf_path in sorted(vcf_files):
@@ -65,6 +87,7 @@ def process_all_vcfs(vcf_folder):
         
         # Sort and index
         if sort_and_index_vcf(vcf_path):
+            move_used_original(vcf_path)
             success += 1
     
     print(f"\n🎉 Summary: {success}/{len(vcf_files)} ready!")

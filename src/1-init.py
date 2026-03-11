@@ -5,12 +5,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 BASE_DIR = Path(__file__).parent
 REPO_DIR = BASE_DIR.parent
 
-def create_required_folders(base_dir=BASE_DIR):
+def create_required_folders(base_dir=REPO_DIR):
     required_dirs = [
         "vcf_files",
+        "vcf_files/used",
         "vcf_annotated",
+        "vcf_annotated/used",
         "vcf_annotated_grch38",
-        "vcf_annotated_chrfix",
         "00_pgs_scores",
         "01_normalized_pgs",
         "02_with_frequencies",

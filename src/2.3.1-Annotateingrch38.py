@@ -4,7 +4,7 @@ import sys
 import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 # Adjust Paths
 VCF_ENTRY = BASE_DIR / "vcf_annotated"

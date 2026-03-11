@@ -6,7 +6,7 @@ import glob
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 
 def read_metadata_file(file_tsv):
@@ -183,12 +183,12 @@ def process_files_prs(files_by_build, output_folder_base="03_prs_ready"):
                 print()
         
         # Save statistics of this build
-        global_stats['por_build'][build] = {
-            'archivos': processed_files,
-            'variantes': total_variants
+        global_stats['per_build'][build] = {
+            'files': processed_files,
+            'variants': total_variants
         }
-        global_stats['total_archivos'] += processed_files
-        global_stats['total_variantes'] += total_variants
+        global_stats['total_files'] += processed_files
+        global_stats['total_variants'] += total_variants
         
         print(f"✓ Build {build} completed: {processed_files} files, {total_variants} variants")
     

@@ -6,7 +6,7 @@ import os
 import requests
 import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 
 def read_header_lines(filepath):
     """

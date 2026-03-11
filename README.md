@@ -13,9 +13,8 @@ This pipeline processes VCF files from the Personal Genome Project UK (PGP-UK) a
     03_prs_ready/           Filtered and ready-to-score variants
     04_af0.01/              Variants filtered by AF > 0.01
     05_final/               Final annotated TSV files (GRCh37 & GRCh38)
-    06_consenso/            Consensus variants across studies
-    codigos/                All Python scripts
-    resultados_prs/         PRS results and visualizations
+    src/                    All Python scripts
+    results_prs/            PRS results and visualizations
 
 ## Features
 

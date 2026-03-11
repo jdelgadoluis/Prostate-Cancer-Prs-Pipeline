@@ -40,6 +40,25 @@ Configure paths in config.py if needed (all paths are relative to the project ro
     python3 codigos/2.3-AnotacionVCF.py
     python3 codigos/4.0-CalcPRSypercentil.py
 
+## Simple web app (upload `.vcf.gz` and run pipeline)
+
+An MVP web interface is included using Streamlit:
+
+1. Install dependencies:
+
+       pip install -r requirements.txt
+
+2. Launch the app from the repository root:
+
+       streamlit run app.py
+
+3. In the browser:
+   - Upload a `*.vcf.gz` file.
+   - Click **Ejecutar pipeline**.
+   - Review logs and output folders shown by the app.
+
+Each execution runs in an isolated `jobs/job-.../` workspace to avoid collisions between runs.
+
 ## Data Sources
 
 - [Personal Genome Project UK (PGP-UK)](https://www.personalgenomes.org.uk/) — Whole-genome VCF files (7 individuals)

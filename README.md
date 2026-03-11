@@ -44,51 +44,18 @@ Configure paths in config.py if needed (all paths are relative to the project ro
 
 An MVP web interface is included using Streamlit:
 
-### A) What do I need to see the real app locally?
-
-If you want to open the web app in your machine, you need:
-
-- Python 3.10+
-- `bcftools` and `tabix` installed in your system PATH (used by the pipeline scripts)
-- Python dependencies from `requirements.txt`
-
-Install everything:
+1. Install dependencies:
 
        pip install -r requirements.txt
 
-Then launch:
+2. Launch the app from the repository root:
 
        streamlit run app.py
 
-If `streamlit` command is not found, run:
-
-       python -m streamlit run app.py
-
-Open in browser:
-
-       http://localhost:8501
-
-### B) What does a normal user have to do?
-
-For a non-technical user, the flow is:
-
-1. Open the web URL (for local mode: `http://localhost:8501`).
-2. Upload one file ending in `*.vcf.gz`.
-3. Click **Ejecutar pipeline**.
-4. Wait for execution to complete (can take minutes depending on data and machine).
-5. Read logs on screen and download the execution log.
-6. Review results in the output folders shown by the app (`results_prs` and/or `05_final`).
-
-### C) What does the app do internally?
-
-On each run, the app:
-
-- Creates an isolated workspace under `jobs/job-.../`
-- Copies the repository into that workspace
-- Places uploaded VCF inside `vcf_files/`
-- Runs all pipeline scripts in order
-- Stores logs in `jobs/job-.../job.log`
-- Exposes output folder paths in the UI
+3. In the browser:
+   - Upload a `*.vcf.gz` file.
+   - Click **Ejecutar pipeline**.
+   - Review logs and output folders shown by the app.
 
 Each execution runs in an isolated `jobs/job-.../` workspace to avoid collisions between runs.
 

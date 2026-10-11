@@ -14,10 +14,13 @@ BASE_DIR = Path(__file__).parent.parent
 
 NCBI_API_KEY = None  # Get API key from https://www.ncbi.nlm.nih.gov/account/settings/ and set it here for faster access to dbSNP API (optional)
 
-def read_vcf_builds(builds_file="vcf_builds.txt"):
+def read_vcf_builds(builds_file=None):
     """
     Reads vcf_builds.txt and returns information of builds
     """
+    if builds_file is None:
+        builds_file = BASE_DIR / "vcf_builds.txt"
+
     vcf_builds = {}
     
     if not os.path.exists(builds_file):
@@ -282,7 +285,7 @@ def normalice_study(df, study_number, build_genome="GRCh37"): #Change to "GRCh38
     
     harmonized_studies = 'hm_rsID' in df.columns or 'hm_chr' in df.columns
     tipo = "harmonized" if harmonized_studies else "standard"
-    print(f"Detected type: {type}")
+    print(f"Detected type: {tipo}")
     
     df_norm = pd.DataFrame()
     

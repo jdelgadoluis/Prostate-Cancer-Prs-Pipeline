@@ -6,7 +6,7 @@ import math
 import scipy.stats as st
 import numpy as np
 import os
-import subprocess
+import re
 from datetime import datetime
 from collections import Counter
 from itertools import combinations
@@ -202,12 +202,17 @@ class PGSLoader:
         }
 
     def _detect_column(self, columns, target_key):
+        synonyms = self.SYNONYMS.get(target_key, [])
+        # 1) Exact match (case-insensitive)
         for col in columns:
-            if col.lower() in self.SYNONYMS.get(target_key, []):
+            if col.lower() in synonyms:
                 return col
+        # 2) Whole-token match: a synonym must be a full token of the column name
+        #    (e.g. 'af' matches 'af_european', but 'ea' must NOT match 'european' or 'beta')
         for col in columns:
-            for syn in self.SYNONYMS.get(target_key, []):
-                if syn in col.lower():
+            tokens = re.split(r'[_\-.\s]+', col.lower())
+            for syn in synonyms:
+                if syn in tokens:
                     return col
         return None
 
@@ -1146,6 +1151,20 @@ def process_all():
         raw_score, var_sum, n_vars, matched_variants = calculate_prs_with_details(
             str(vcf_path), pgs_dict
         )
+        if raw_score is None:
+            print(f" ✗ Error reading the VCF, skipping\n")
+            results.append({
+                'VCF': vcf_name,
+                'VCF_Build': vcf_build,
+                'PGS': pgs_name,
+                'SNPs_matched': 0,
+                'Z_Score': 'N/A',
+                'Percentile': 'N/A',
+                'Risk': 'N/A',
+                'Status': 'Error reading VCF'
+            })
+            continue
+
         print(f" DEBUG:")
         print(f" raw_score: {raw_score:.6f}")
         print(f" var_sum: {var_sum:.6f}")
@@ -1174,8 +1193,8 @@ def process_all():
         percentile = st.norm.cdf(z_score) * 100
         
         risk_level = "Average"
-        if percentile > 84: risk_level = "High"
-        elif percentile > 97: risk_level = "Very High"
+        if percentile > 97: risk_level = "Very High"
+        elif percentile > 84: risk_level = "High"
         elif percentile < 16: risk_level = "Low"
         
         print(f" ✓ {n_vars} SNPs | Z={z_score:.3f} | P{percentile:.1f} | {risk_level}")
@@ -1246,12 +1265,6 @@ def process_all():
 
 
 if __name__ == "__main__":
-    try:
-        import matplotlib_venn
-    except ImportError:
-        print("Installing matplotlib-venn...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "matplotlib-venn"])
-    
     process_all()
 
     

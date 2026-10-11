@@ -15,36 +15,35 @@ BASE_DIR = Path(__file__).parent.parent
 NCBI_API_KEY = None  # Get API key from https://www.ncbi.nlm.nih.gov/account/settings/ and set it here for faster access to dbSNP API (optional)
 
 def read_vcf_builds(builds_file=None):
-    """
-    Reads vcf_builds.txt and returns information of builds
-    """
+    """Read vcf_builds.txt and summarize only explicitly known GRCh builds."""
     if builds_file is None:
         builds_file = BASE_DIR / "vcf_builds.txt"
 
-    vcf_builds = {}
-    
     if not os.path.exists(builds_file):
         print(f" Not found {builds_file}")
         return None, {}, {}
-    
-    with open(builds_file, 'r') as f:
-        lines = f.readlines()[2:]
-        
-        for line in lines:
-            if line.strip():
-                parts = line.strip().split('\t')
-                if len(parts) == 2:
-                    vcf_builds[parts[0]] = parts[1]
-    
+
+    vcf_builds = {}
+    with open(builds_file, "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split("\t")
+            if len(parts) != 2 or parts[0] in ("", "File") or set(parts[0]) <= {"="}:
+                continue
+            vcf_builds[parts[0]] = parts[1]
+
     if not vcf_builds:
         return None, {}, {}
-    
-    builds = list(vcf_builds.values())
-    build_counter = Counter(builds)
-    predominant_build = build_counter.most_common(1)[0][0]
-    
-    return predominant_build, build_counter, vcf_builds
 
+    unknown = {name: build for name, build in vcf_builds.items() if build not in ("GRCh37", "GRCh38")}
+    if unknown:
+        print(f" ⚠️ Ignoring {len(unknown)} VCF(s) with unknown build")
+    known = {name: build for name, build in vcf_builds.items() if build in ("GRCh37", "GRCh38")}
+    if not known:
+        return None, Counter(), vcf_builds
+
+    build_counter = Counter(known.values())
+    predominant_build = build_counter.most_common(1)[0][0]
+    return predominant_build, build_counter, known
 
 def search_all_pgs_files(folder_base="00_pgs_scores"):
     """
@@ -61,108 +60,85 @@ def search_all_pgs_files(folder_base="00_pgs_scores"):
     for root, dirs, files in os.walk(folder_base):
         for file in files:
             if file.endswith('.txt') or file.endswith('.txt.gz'):
-                complete_path = str(Path(root) / file)
-                found_files.append(complete_path)
-                print(f" ✓ {complete_path}")
-    
+                complete_path = Path(root) / file
+                if file.endswith('.txt.gz') and complete_path.with_suffix('').exists():
+                    continue  # Prefer the decompressed sibling; avoid processing the same score twice.
+                found_files.append(str(complete_path))
+
+    found_files.sort()
+    for complete_path in found_files:
+        print(f" ✓ {complete_path}")
     print(f"\n📦 Total files found: {len(found_files)}")
     return found_files
 
 
-def obtain_alleles_dbsnp(rsid, build="GRCh37"): #Change to "GRCh38" for the other build
-    """
- Gets alleles from dbSNP API specifying the build
-    """
-    if rsid.startswith('rs'):
-        rsid_clean = rsid[2:]
-    else:
-        rsid_clean = rsid
-    
+def obtain_alleles_dbsnp(rsid, build="GRCh37"):
+    """Fetch alleles from dbSNP, requiring an exact assembly placement."""
+    rsid_clean = rsid[2:] if rsid.startswith("rs") else rsid
     url = f"https://api.ncbi.nlm.nih.gov/variation/v0/refsnp/{rsid_clean}"
-
-    headers = {}
-    if NCBI_API_KEY:
-        headers['api-key'] = NCBI_API_KEY
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            
-            primary = data.get('primary_snapshot_data', {})
-            placements = primary.get('placements_with_allele', [])
-            
-            if not placements:
-                return None
-            
-            # Search placement that matches with the requested build
-            target_placement = None
-            for placement in placements:
-                seq_id = placement.get('seq_id', '')
-                
-                if build == "GRCh37":
-                    if 'NC_' in seq_id and not '.11' in seq_id:
-                        target_placement = placement
-                        break
-                elif build == "GRCh38":
-                    if 'NC_' in seq_id and ('.10' in seq_id or '.11' in seq_id):
-                        target_placement = placement
-                        break
-            
-            if not target_placement:
-                target_placement = placements[0]
-            
-            seq_id = target_placement.get('seq_id', '')
-            chrom = seq_id.replace('NC_', '').split('.')[0]
-            chrom_map = {
-                '000001': '1', '000002': '2', '000003': '3', '000004': '4',
-                '000005': '5', '000006': '6', '000007': '7', '000008': '8',
-                '000009': '9', '000010': '10', '000011': '11', '000012': '12',
-                '000013': '13', '000014': '14', '000015': '15', '000016': '16',
-                '000017': '17', '000018': '18', '000019': '19', '000020': '20',
-                '000021': '21', '000022': '22', '000023': 'X', '000024': 'Y'
-            }
-            chrom = chrom_map.get(chrom, chrom)
-            
-            alleles_data = target_placement.get('alleles', [])
-            
-            ref_allele = None
-            alt_alleles = []
-            position = None
-            
-            for allele_info in alleles_data:
-                allele = allele_info.get('allele', {})
-                spdi = allele.get('spdi', {})
-                
-                if spdi:
-                    pos = spdi.get('position')
-                    if position is None:
-                        position = pos
-                    
-                    deleted = spdi.get('deleted_sequence', '')
-                    inserted = spdi.get('inserted_sequence', '')
-                    
-                    if ref_allele is None and deleted:
-                        ref_allele = deleted
-                    
-                    if inserted and inserted != deleted:
-                        if inserted not in alt_alleles:
-                            alt_alleles.append(inserted)
-            
-            return {
-                'rsid': f'rs{rsid_clean}',
-                'chromosome': chrom,
-                'position': position,
-                'ref_allele': ref_allele,
-                'alt_alleles': alt_alleles,
-                'build': build
-            }
-        else:
-            return None
-    except Exception as e:
+    headers = {"api-key": NCBI_API_KEY} if NCBI_API_KEY else {}
+    build_versions = {"GRCh37": ".10", "GRCh38": ".11"}
+    if build not in build_versions:
+        print(f" ⚠️ Unknown build '{build}' for {rsid}")
         return None
 
+    try:
+        response = None
+        for attempt in range(1, 4):
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 429 or response.status_code >= 500:
+                sleep(2 * attempt)
+                continue
+            break
 
+        if response is None or response.status_code != 200:
+            return None
+        data = response.json()
+        placements = data.get("primary_snapshot_data", {}).get("placements_with_allele", [])
+        target_placement = next(
+            (placement for placement in placements
+             if placement.get("seq_id", "").startswith("NC_")
+             and placement.get("seq_id", "").endswith(build_versions[build])),
+            None,
+        )
+        if target_placement is None:
+            return None
+
+        seq_id = target_placement.get("seq_id", "")
+        chrom = seq_id.replace("NC_", "").split(".")[0]
+        chrom_map = {
+            "000001": "1", "000002": "2", "000003": "3", "000004": "4",
+            "000005": "5", "000006": "6", "000007": "7", "000008": "8",
+            "000009": "9", "000010": "10", "000011": "11", "000012": "12",
+            "000013": "13", "000014": "14", "000015": "15", "000016": "16",
+            "000017": "17", "000018": "18", "000019": "19", "000020": "20",
+            "000021": "21", "000022": "22", "000023": "X", "000024": "Y",
+        }
+        chrom = chrom_map.get(chrom, chrom)
+
+        ref_allele = None
+        alt_alleles = []
+        position = None
+        for allele_info in target_placement.get("alleles", []):
+            spdi = allele_info.get("allele", {}).get("spdi", {})
+            if not spdi:
+                continue
+            if position is None:
+                position = spdi.get("position")
+            deleted = spdi.get("deleted_sequence", "")
+            inserted = spdi.get("inserted_sequence", "")
+            if ref_allele is None and deleted:
+                ref_allele = deleted
+            if inserted and inserted != deleted and inserted not in alt_alleles:
+                alt_alleles.append(inserted)
+
+        return {
+            "rsid": f"rs{rsid_clean}", "chromosome": chrom, "position": position,
+            "ref_allele": ref_allele, "alt_alleles": alt_alleles, "build": build,
+        }
+    except Exception as exc:
+        print(f" ⚠️ dbSNP query failed for {rsid}: {exc}")
+        return None
 def infer_other_allele_dbsnp(rsid, effect_allele, build="GRCh37"): #Change to "GRCh38" for the other build
     """
  Infers other_allele considering the genome build
@@ -174,17 +150,16 @@ def infer_other_allele_dbsnp(rsid, effect_allele, build="GRCh37"): #Change to "G
     
     ref = allele_info['ref_allele']
     alts = allele_info['alt_alleles']
-    
+
+    if not ref:
+        return None
     if effect_allele == ref:
         return alts[0] if alts else None
-    
     if effect_allele in alts:
         return ref
-    
-    all_alleles = [ref] + alts
-    other_alleles = [a for a in all_alleles if a != effect_allele]
-    
-    return other_alleles[0] if other_alleles else None
+
+    # Do not guess when the effect allele is absent from the requested assembly.
+    return None
 
 
 def detect_build_file(gz_file):
@@ -223,58 +198,47 @@ def detect_build_file(gz_file):
                                 return 'GRCh37'
                     else:
                         break
-    except:
+    except (OSError, UnicodeDecodeError):
         pass
-    
+
+    print(f" ⚠️ Build not found in {Path(gz_file).name}: assuming GRCh37 (check the file header)")
     return 'GRCh37'  # Default
 
 
-def load_study(gz_file): 
-    """
-    Loads study and extracts metadata including build. Supports both .txt.gz and .txt files.
-    """
+def load_study(gz_file):
+    """Load a PGS score table and its leading metadata without duplicating the full text in memory."""
     metadata = {}
-    
-    # Determine if file is gzipped or plain text
-    if gz_file.endswith('.gz'):
-        f = gzip.open(gz_file, 'rt')
-    else:
-        f = open(gz_file, 'r')
-    
-    try:
-        complete_lines = f.readlines()
-        
-        for line in complete_lines:
-            if line.startswith('#'):
-                if 'pgs_id=' in line:
-                    metadata['pgs_id'] = line.split('=')[1].strip()
-                elif 'pgs_name=' in line:
-                    metadata['pgs_name'] = line.split('=', 1)[1].strip()
-                elif 'citation=' in line:
-                    citation = line.split('=', 1)[1].strip()
-                    # Extract author more robustly
-                    if ' et al' in citation:
-                        autor = citation.split(' et al')[0].strip()
-                    elif ',' in citation:
-                        autor = citation.split(',')[0].strip()
-                    else:
-                        autor = citation.split()[0].strip() if citation else 'Unknown'
-                    metadata['main_author'] = autor
-                elif 'trait_reported=' in line:
-                    metadata['trait'] = line.split('=', 1)[1].strip()
-                elif 'genome_build=' in line:
-                    metadata['genome_build'] = line.split('=')[1].strip()
-        
-        lineas_datos = [l for l in complete_lines if not l.startswith('#')]
-    finally:
-        f.close()
-    
-    from io import StringIO
-    df = pd.read_csv(StringIO(''.join(lineas_datos)), sep='\t')
-    df.attrs['metadata'] = metadata
-    
-    return df
+    opener = gzip.open if str(gz_file).endswith('.gz') else open
+    with opener(gz_file, 'rt', encoding='utf-8') as handle:
+        for line in handle:
+            if not line.startswith('#'):
+                break
+            if '=' not in line:
+                continue
+            key, value = line[1:].strip().split('=', 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key == 'pgs_id':
+                metadata['pgs_id'] = value
+            elif key == 'pgs_name':
+                metadata['pgs_name'] = value
+            elif key == 'citation':
+                if ' et al' in value:
+                    author = value.split(' et al', 1)[0].strip()
+                elif ',' in value:
+                    author = value.split(',', 1)[0].strip()
+                else:
+                    author = value.split()[0].strip() if value else 'Unknown'
+                metadata['main_author'] = author
+            elif key == 'trait_reported':
+                metadata['trait'] = value
+            elif key == 'genome_build':
+                metadata['genome_build'] = value
 
+    # pandas streams/decompresses the file directly instead of building a second in-memory string.
+    df = pd.read_csv(gz_file, sep='\t', comment='#', compression='infer', encoding='utf-8')
+    df.attrs['metadata'] = metadata
+    return df
 
 def normalice_study(df, study_number, build_genome="GRCh37"): #Change to "GRCh38" for the other build
     """
@@ -309,11 +273,13 @@ def normalice_study(df, study_number, build_genome="GRCh37"): #Change to "GRCh38
     df_norm['effect_allele'] = df['effect_allele']
     df_norm['effect_weight'] = df['effect_weight']
     if 'OR' in df.columns:
-        mask = df_norm['effect_weight'] > 0.5
+        # Convert only rows where effect_weight still equals OR; log(OR) values are already beta.
+        or_values = pd.to_numeric(df['OR'], errors='coerce')
+        weight = pd.to_numeric(df_norm['effect_weight'], errors='coerce')
+        mask = (or_values > 0) & (np.abs(weight - or_values) < 1e-9) & (np.abs(weight) > 1e-9)
         if mask.any():
-            print(f" Converting {mask.sum()} rows OR -> beta in effect_weight")
-            or_valid = df.loc[mask, 'OR'].clip(lower=1e-12)
-            df_norm.loc[mask, 'effect_weight'] = np.log(or_valid)
+            print(f" Converting {mask.sum()} rows OR -> beta (log) in effect_weight")
+            df_norm.loc[mask, 'effect_weight'] = np.log(or_values[mask])
     # Save build
     df_norm['genome_build'] = build_genome
     
@@ -385,11 +351,16 @@ def normalice_study(df, study_number, build_genome="GRCh37"): #Change to "GRCh38
         if removed > 0:
             print(f"✓ Filtered by qc_match_pos: {before} → {len(df_norm)} ({removed} removed)")
     
-    # Remove duplicates
+    # Drop conflicting effect-allele definitions instead of choosing one arbitrarily.
     before = len(df_norm)
+    allele_counts = df_norm.groupby('rsID')['effect_allele'].nunique(dropna=False)
+    conflicting = allele_counts[allele_counts > 1].index
+    if len(conflicting):
+        df_norm = df_norm[~df_norm['rsID'].isin(conflicting)].copy()
+        print(f"✓ Removed {len(conflicting)} rsIDs with conflicting effect alleles")
     df_norm = df_norm.drop_duplicates(subset=['rsID'], keep='first')
     if before != len(df_norm):
-        print(f"✓ Removed duplicates: {before} → {len(df_norm)}")
+        print(f"✓ Removed duplicates/conflicts: {before} → {len(df_norm)}")
     
     # Filter valid rsIDs 
     df_norm = df_norm[df_norm['rsID'].notna()].copy()
@@ -564,24 +535,26 @@ def process_pgs_studies(pgs_folder="00_pgs_scores",
     os.makedirs(output_folder, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     files_generated = []
-    
+
+    # Prevent later stages from reading multiple versions of the same study.
+    for old_file in Path(output_folder).glob("*_normalized*.tsv"):
+        old_file.unlink()
+
     for i, (df, build) in enumerate(zip(studies_norm, builds_studies), 1):
         author = authors_names[i-1]
         author_clean = re.sub(r'[^\w\s-]', '', author).replace(' ', '_')
-        
-        file_out = str(Path(output_folder) / f'{author_clean}_{build}_normalized_{timestamp}.tsv')
-        
         metadata = studies_raw[i-1].attrs.get('metadata', {})
-        
-        with open(file_out, 'w') as f:
+        pgs_id_clean = re.sub(r'[^\w-]', '', metadata.get('pgs_id', '')) or f'study{i}'
+        file_out = str(Path(output_folder) / f'{pgs_id_clean}_{author_clean}_{build}_normalized.tsv')
+
+        with open(file_out, 'w', encoding='utf-8') as f:
             f.write(f"#PGS_ID={metadata.get('pgs_id', 'N/A')}\n")
             f.write(f"#PGS_NAME={metadata.get('pgs_name', 'N/A')}\n")
             f.write(f"#AUTHOR={metadata.get('main_author', 'N/A')}\n")
             f.write(f"#TRAIT={metadata.get('trait', 'N/A')}\n")
             f.write(f"#GENOME_BUILD={build}\n")
             f.write(f"#NORMALIZED_DATE={timestamp}\n")
-            f.write(f"#\n")
-            
+            f.write("#\n")
             df.to_csv(f, sep='\t', index=False)
         
         files_generated.append(file_out)
@@ -593,8 +566,12 @@ def process_pgs_studies(pgs_folder="00_pgs_scores",
     for i, (df, build) in enumerate(zip(studies_norm, builds_studies), 1):
         print(f"\nStudy {i} ({build}):")
         print(f" Total variants: {len(df)}")
-        print(f" With other_allele: {df['other_allele'].notna().sum()} ({df['other_allele'].notna().sum()/len(df)*100:.1f}%)")
-        print(f" With freq european: {df['af_european'].notna().sum()} ({df['af_european'].notna().sum()/len(df)*100:.1f}%)")
+        total = len(df)
+        denominator = total or 1
+        other_count = df['other_allele'].notna().sum()
+        frequency_count = df['af_european'].notna().sum()
+        print(f" With other_allele: {other_count} ({other_count/denominator*100:.1f}%)")
+        print(f" With freq european: {frequency_count} ({frequency_count/denominator*100:.1f}%)")
         print(f" Other_allele inferred: {df['other_allele_inferred'].sum()}")
         
         fuentes = df['af_source'].value_counts()
@@ -612,6 +589,9 @@ if __name__ == "__main__":
     studies = process_pgs_studies(
         pgs_folder=BASE_DIR/"00_pgs_scores",
         infer_alleles=True,
-        max_variants_test=None,  # None = procesar todas las variantes
+        max_variants_test=None,
         output_folder=BASE_DIR/"01_normalized_pgs"
     )
+    if not studies or not any(not study.empty for study in studies):
+        print("❌ No usable normalized PGS data were produced.")
+        sys.exit(1)

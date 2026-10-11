@@ -16,7 +16,6 @@ BASE_DIR = Path(__file__).parent.parent
 # ============================================================================
 GENES = ["ATM", "BRCA1", "BRCA2", "CHEK2", "EPCAM", "HOXB13", "MLH1", 
          "MSH2", "MSH6", "NBN", "PALB2", "PMS2", "RAD51D", "TP53"]
-ASSEMBLY = "GRCh37"
 PROMOTER_UPSTREAM = 2000
 VCF_DIR = BASE_DIR / "vcf_annotated"
 OUT_DIR = BASE_DIR / "results_prs" / "outputs" / "genes14_clinvar"
@@ -26,18 +25,22 @@ os.makedirs(OUT_DIR, exist_ok=True)
 os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(PLOT_DATA_DIR, exist_ok=True)
 
-ENSEMBL37 = "https://grch37.rest.ensembl.org"
+ENSEMBL_SERVERS = {
+    "GRCh37": "https://grch37.rest.ensembl.org",
+    "GRCh38": "https://rest.ensembl.org",
+}
 HEADERS_JSON = {"Content-Type": "application/json", "Accept": "application/json"}
+REQUEST_TIMEOUT = 30
 
 # ============================================================================
 # Functions ENSEMBL API
 # ============================================================================
-def ensembl_get_gene_info(symbol):
-    """Gets information of the gene from Ensembl REST API"""
+def ensembl_get_gene_info(symbol, base_url):
+    """Get Ensembl gene information from the REST server for the VCF assembly."""
     try:
         r = requests.get(
-            f"{ENSEMBL37}/xrefs/symbol/homo_sapiens/{symbol}", 
-            headers=HEADERS_JSON
+            f"{base_url}/xrefs/symbol/homo_sapiens/{symbol}",
+            headers=HEADERS_JSON, timeout=REQUEST_TIMEOUT
         )
         r.raise_for_status()
         xrefs = r.json()
@@ -49,8 +52,8 @@ def ensembl_get_gene_info(symbol):
             
         gid = gene_ids[0]
         r2 = requests.get(
-            f"{ENSEMBL37}/lookup/id/{gid}?expand=1", 
-            headers=HEADERS_JSON
+            f"{base_url}/lookup/id/{gid}?expand=1",
+            headers=HEADERS_JSON, timeout=REQUEST_TIMEOUT
         )
         r2.raise_for_status()
         return r2.json()
@@ -126,13 +129,13 @@ def label_for_position(region, pos):
     return min(hits, key=LABEL_PRIORITY.get) if hits else "gene"
 
 
-def fetch_regions_for_genes(genes):
-    """Gets regions for all the genes"""
+def fetch_regions_for_genes(genes, base_url):
+    """Fetch gene regions from the Ensembl server matching the genome build."""
     print(f" Getting genomic regions  for {len(genes)} genes...")
     all_regions = {}
     
     for g in tqdm(genes, desc="Genes"):
-        gj = ensembl_get_gene_info(g)
+        gj = ensembl_get_gene_info(g, base_url)
         if gj:
             regs = build_regions_from_ensembl(gj, upstream_bp=PROMOTER_UPSTREAM)
             all_regions[g] = regs
@@ -160,12 +163,16 @@ def iterate_variants_in_regions(vcf_path, regions):
 
     vcf = VCF(vcf_path)
     sample_id = vcf.samples[0] if vcf.samples else "UNKNOWN"
-    
+    contigs = set(getattr(vcf, "seqnames", []) or [])
+
     for reg in regions:
+        chrom = str(reg["chrom"])
+        if contigs and chrom not in contigs and f"chr{chrom}" in contigs:
+            chrom = f"chr{chrom}"
         try:
-            for v in vcf(f"{reg['chrom']}:{reg['start']}-{reg['end']}"):
+            for v in vcf(f"{chrom}:{reg['start']}-{reg['end']}"):
                 yield v, label_for_position(reg, v.POS), sample_id
-        except:
+        except (KeyError, ValueError, RuntimeError):
             continue
 
 
@@ -205,8 +212,8 @@ def get_sample_metrics(v, sample_index=0):
 
 # VEP Functions; ANNOTATION
 
-def vep_annotate_batch(variant_strings, max_retries=3):
-    """Annotates variants using VEP REST API with retries"""
+def vep_annotate_batch(variant_strings, base_url, max_retries=3):
+    """Annotate variants using the build-specific VEP REST API with retries."""
     payload = {
         "variants": variant_strings, 
         "canonical": 1, 
@@ -216,9 +223,8 @@ def vep_annotate_batch(variant_strings, max_retries=3):
     for attempt in range(max_retries):
         try:
             r = requests.post(
-                f"{ENSEMBL37}/vep/homo_sapiens/region", 
-                headers=HEADERS_JSON, 
-                data=json.dumps(payload)
+                f"{base_url}/vep/homo_sapiens/region",
+                headers=HEADERS_JSON, json=payload, timeout=REQUEST_TIMEOUT
             )
             
             if r.status_code == 429:
@@ -285,7 +291,7 @@ def classify_clinvar(clin_sig):
 # ============================================================================
 # Main Processing 
 # ============================================================================
-def process_vcf(vcf_path, regions_by_gene, sample_id, batch_size=100):
+def process_vcf(vcf_path, regions_by_gene, sample_id, base_url, batch_size=100):
     """Processes a VCF file and generates a DataFrame with annotated variants"""
     recs = []
     seen = set()
@@ -328,7 +334,7 @@ def process_vcf(vcf_path, regions_by_gene, sample_id, batch_size=100):
     for i in tqdm(range(0, len(recs), batch_size), desc=f"Annotating with VEP"):
         batch = recs[i:i+batch_size]
         vlist = [r["vep_str"] for r in batch]
-        vep_res = vep_annotate_batch(vlist)
+        vep_res = vep_annotate_batch(vlist, base_url)
         
         by_input = {rec.get("input"): rec for rec in vep_res if rec.get("input")}
         
@@ -428,43 +434,54 @@ def export_plot_data(df, sample_id):
 if __name__ == "__main__":
     print(" Variants Analysis In Genes Of Predisposition To Cancer")
 
-    # 1. Get genomic regions
-    regions_by_gene = fetch_regions_for_genes(GENES)
-    
-    # 2. Get VCF files
-    vcf_files = [
-        str(Path(VCF_DIR) / f) 
-        for f in os.listdir(VCF_DIR) 
-        if f.endswith((".vcf.gz", ".vcf"))
-    ]
-    
-    if not vcf_files:
-        print(f" No VCF files were found in {VCF_DIR}")
-        exit(1)
-    
-    print(f"\n📂 Found {len(vcf_files)} VCF files")
-    
-    # 3. Process each VCF
-    for vcf_path in vcf_files:
-        print(f"📄 Processing: {os.path.basename(vcf_path)}")
+    # The annotation reference must match the VCF assembly exactly.
+    builds_file = BASE_DIR / "vcf_builds.txt"
+    builds_by_sample = {}
+    if builds_file.exists():
+        with open(builds_file, "r", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.strip().split("\t")
+                if len(parts) != 2 or parts[0] in ("", "File") or set(parts[0]) <= {"="}:
+                    continue
+                builds_by_sample[Path(parts[0]).name.split("_")[0]] = parts[1]
+    else:
+        print(f" Build mapping not found: {builds_file}")
+        sys.exit(1)
 
-        # Extract Sample ID from the name of the file
-        sample_id = extract_sample_id_from_filename(vcf_path)
-        print(f" Sample ID extracted: {sample_id}")
-        
-        # Process VCF
-        df = process_vcf(vcf_path, regions_by_gene, sample_id, batch_size=100)
-        
-        # Save CSV complete in folder
+    if not VCF_DIR.exists():
+        print(f" VCF folder not found: {VCF_DIR}")
+        sys.exit(1)
+    vcf_files = sorted(
+        path for path in VCF_DIR.iterdir()
+        if path.is_file() and path.name.endswith((".vcf.gz", ".vcf"))
+        and "_annotated" in path.name and "_chrfix" not in path.name
+    )
+    if not vcf_files:
+        print(f" No annotated VCF files were found in {VCF_DIR}")
+        sys.exit(1)
+
+    print(f"\n📂 Found {len(vcf_files)} VCF files")
+    regions_by_build = {}
+    for vcf_path in vcf_files:
+        sample_id = extract_sample_id_from_filename(str(vcf_path))
+        build = builds_by_sample.get(sample_id.split("_")[0])
+        if build not in ENSEMBL_SERVERS:
+            print(f"⚠️ Skipping {vcf_path.name}: unknown/unsupported build ({build or 'Unknown'})")
+            continue
+
+        print(f"\n📄 Processing: {vcf_path.name} ({build})")
+        if build not in regions_by_build:
+            regions_by_build[build] = fetch_regions_for_genes(GENES, ENSEMBL_SERVERS[build])
+        df = process_vcf(
+            str(vcf_path), regions_by_build[build], sample_id,
+            ENSEMBL_SERVERS[build], batch_size=100,
+        )
         out_csv = str(Path(CSV_DIR) / f"{sample_id}_mutations.csv")
         df.to_csv(out_csv, index=False)
         print(f" CSV complete saved: {out_csv}")
-        
-        # Export data for custom plots 
         export_plot_data(df, sample_id)
-        
-        print(f"📊 Total annotated variants : {len(df)}")
-    
+        print(f"📊 Total annotated variants: {len(df)}")
+
     print(" PROCESSING COMPLETED")
     print(f" CSVs complete in: {CSV_DIR}")
     print(f" Data for plots custom in: {PLOT_DATA_DIR}")

@@ -1,9 +1,11 @@
 from pathlib import Path
 import sys
 import subprocess
-sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent
+
+BASE_DIR = Path(__file__).resolve().parent
 REPO_DIR = BASE_DIR.parent
+sys.path.insert(0, str(REPO_DIR))
+
 
 def create_required_folders(base_dir=REPO_DIR):
     required_dirs = [
@@ -25,6 +27,7 @@ def create_required_folders(base_dir=REPO_DIR):
         "05_final/GRCh38",
         "results_prs",
         "results_prs/high_contribution_variants",
+        "results_prs/analysis",
         "results_prs/outputs/genes14_clinvar",
         "results_prs/outputs/genes14_clinvar/csv_results",
         "results_prs/outputs/genes14_clinvar/plot_data",
@@ -40,18 +43,24 @@ def create_required_folders(base_dir=REPO_DIR):
     print(f"Verified folders: {len(required_dirs)} | New folders created: {created}")
     return [Path(base_dir) / folder for folder in required_dirs]
 
-try:
+
+def install_requirements():
+    """Install requirements with the interpreter running this script."""
     python_exe = sys.executable
-    requirements_path = str(REPO_DIR / "requirements.txt")
-
-    create_required_folders()
-
+    requirements_path = REPO_DIR / "requirements.txt"
     print(f"Python in use: {python_exe}")
+    try:
+        subprocess.run([python_exe, "-m", "pip", "install", "--upgrade", "pip"], check=True)
+        subprocess.run([python_exe, "-m", "pip", "install", "-r", str(requirements_path)], check=True)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        print(f"Error while installing packages: {exc}")
+        return False
 
-    # Always install with the same interpreter that runs this script.
-    subprocess.run([python_exe, '-m', 'pip', 'install', '--upgrade', 'pip'], check=True)
-    subprocess.check_call([python_exe, '-m', 'pip', 'install', '-r', requirements_path])
     print("Packages installed successfully")
-except subprocess.CalledProcessError as e:
-    print(f"Error while installing packages: {e}")
+    return True
 
+
+if __name__ == "__main__":
+    create_required_folders()
+    if not install_requirements():
+        sys.exit(1)

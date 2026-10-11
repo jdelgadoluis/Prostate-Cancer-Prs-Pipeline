@@ -2,309 +2,256 @@ from pathlib import Path
 import sys
 import subprocess
 import os
-sys.path.insert(0, str(Path(__file__).parent.parent))
-BASE_DIR = Path(__file__).parent.parent
+import gzip
+import pysam
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+# dbSNP common VCFs, one release per genome build.
+URLS_DBSNP = {
+    "GRCh37": "https://ftp.ncbi.nlm.nih.gov/snp/organisms/human_9606_b151_GRCh37p13/VCF/common_all_20180423.vcf.gz",
+    "GRCh38": "https://ftp.ncbi.nlm.nih.gov/snp/organisms/human_9606_b151_GRCh38p7/VCF/common_all_20180418.vcf.gz",
+}
 
 
 def read_vcf_builds(file_builds=None):
-    """
- Read the file vcf_builds.txt and returns a dictionary with the build of each VCF
-    """
+    """Read vcf_builds.txt and return {vcf_file_name: build}."""
     if file_builds is None:
         file_builds = BASE_DIR / "vcf_builds.txt"
-
     builds_dict = {}
     if not os.path.exists(file_builds):
-        print(f" File {file_builds} not found")
-        print(f"Path searched: {os.path.abspath(file_builds)}")
+        print(f" File {file_builds} not found; searched {os.path.abspath(file_builds)}")
         return builds_dict
-    
-    with open(file_builds, 'r') as f:
-        for line in f:
+
+    with open(file_builds, "r", encoding="utf-8") as handle:
+        for line in handle:
             line = line.strip()
-            if line and '\t' in line:
-                vcf_file, build = line.split('\t')
-                if vcf_file != "File":
-                    builds_dict[vcf_file] = build
-    
+            if not line or "\t" not in line:
+                continue
+            vcf_file, build = line.split("\t", 1)
+            if vcf_file not in ("File", "") and not set(vcf_file) <= {"="}:
+                builds_dict[vcf_file] = build
     print(f"✓ Read {len(builds_dict)} files of vcf_builds.txt")
     return builds_dict
 
+
 def download_dbsnp_by_build(build):
-    """
- Download the correct dbSNP file according to the genome build
- NOTE: The common_all files are smaller (~500MB) than the All files (~20GB)
- """
-    urls_dbsnp = {
-        "GRCh37": "https://ftp.ncbi.nlm.nih.gov/snp/organisms/human_9606_b151_GRCh37p13/VCF/common_all_20180423.vcf.gz",
-        "GRCh38": "https://ftp.ncbi.nlm.nih.gov/snp/organisms/human_9606_b151_GRCh38p7/VCF/common_all_20180418.vcf.gz"
-    }
-    
-    # Alternative URLs with all the SNPs (larger files, more complete)
-    urls_dbsnp_all = {
-        "GRCh37": "https://ftp.ncbi.nlm.nih.gov/snp/organisms/human_9606_b151_GRCh37p13/VCF/All_20180423.vcf.gz",
-        "GRCh38": "https://ftp.ncbi.nlm.nih.gov/snp/organisms/human_9606_b151_GRCh38p7/VCF/All_20180418.vcf.gz"
-    }
-    
-    if build not in urls_dbsnp:
+    """Download/index dbSNP for a build, returning its path or None on failure."""
+    if build not in URLS_DBSNP:
         print(f" Build {build} not recognized. Only supports GRCh37 and GRCh38")
         return None
-    
-    url = urls_dbsnp[build]
+
+    url = URLS_DBSNP[build]
     file_local = BASE_DIR / f"dbsnp_{build}.vcf.gz"
-    
-    if os.path.exists(file_local):
+    index_file = Path(str(file_local) + ".tbi")
+
+    if file_local.exists():
         print(f"✓ File dbSNP already exists for {build}: {file_local}")
-        return file_local
-    
-    print(f" Downloading dbSNP for {build}")
-    print(f"URL: {url}")
-    print(f" This file is large (~500MB-1GB), it may take several minutes")
+        if index_file.exists():
+            return file_local
+        print(" Index missing, creating it...")
+        try:
+            subprocess.run(
+                ["tabix", "-f", "-p", "vcf", str(file_local)],
+                check=True, capture_output=True, text=True, timeout=600,
+            )
+            return file_local
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            print(f" Error creating index: {exc}")
+            return None
+
+    print(f" Downloading dbSNP for {build}\nURL: {url}")
+    print(" This file is large (~500MB), it may take several minutes")
+    command = [
+        "wget", "--continue", "--timeout=30", "--tries=5", "--progress=dot:giga",
+        url, "-O", str(file_local),
+    ]
+
+    def remove_partial():
+        if file_local.exists():
+            file_local.unlink()
 
     try:
-        # Use wget with more robust options
-        cmd = [
-            'wget',
-            '--continue',  # Continue interrupted downloads
-            '--timeout=30',  # Connection timeout
-            '--tries=5',  # Retries
-            '--progress=dot:giga',  # Show progress
-            url,
-            '-O', str(file_local)
-        ]
-        
-        result = subprocess.run(cmd, capture_output=False, text=True, timeout=3600)  # 1 hour timeout
-        
-        if result.returncode == 0 and os.path.exists(file_local):
-            print(f"\n✓ Download successful: {file_local}")
-            
-            # Check that the file is not corrupted
-            size = os.path.getsize(file_local)
-            print(f"✓ Size of the file: {size / (1024*1024):.2f} MB")
-            
-            # Create index tabix
-            tbi_file = str(file_local) + '.tbi'
-            if not os.path.exists(tbi_file):
-                print(f" Creating tabix index for {file_local}...")
-                try:
-                    subprocess.run(['tabix', '-p', 'vcf', str(file_local)],
-                                 check=True, capture_output=True, text=True, timeout=600)
-                    print(f"✓ Index created successfully")
-                except Exception as e:
-                    print(f" Error creating index: {e}")
-                    return None
-            
-            return file_local
-        else:
-            print(f" Error with wget (code: {result.returncode})")
-            if os.path.exists(file_local):
-                os.remove(file_local)
-            return None
-            
+        result = subprocess.run(command, timeout=3600)
     except subprocess.TimeoutExpired:
-        print(f" Timeout of download after of 1 hour")
-        print(f" Suggestion: Download the file manually from:")
-        print(f" {url}")
-        print(f" And save it as: {file_local}")
-        if os.path.exists(file_local):
-            os.remove(file_local)
+        print(" Download timed out after 1 hour")
+        print(f"Download manually from {url} and save as {file_local}")
+        remove_partial()
         return None
     except FileNotFoundError:
-        print(f" wget is not installed. Install it with: brew install wget")
-        print(f" Or download it manually from:")
-        print(f" {url}")
-        print(f" And save it as: {file_local}")
-        return None
-    except Exception as e:
-        print(f" Error downloading: {e}")
-        if os.path.exists(file_local):
-            os.remove(file_local)
+        print(f" wget is not installed. Install it or download manually from {url}")
+        print(f"Save the file as {file_local}")
         return None
 
-def download_with_curl(url, file_local):
-    """
- Alternative method using curl (more common in macOS)
-    """
+    if result.returncode != 0 or not file_local.exists():
+        print(f" Error with wget (code: {result.returncode})")
+        remove_partial()
+        return None
+
+    print(f"\n✓ Download successful: {file_local}")
+    print(f"✓ Size: {file_local.stat().st_size / (1024 * 1024):.2f} MB")
     try:
-        print(f" Attempting download with curl...")
-        cmd = [
-            'curl',
-            '-L',  # Follow redirects
-            '-C', '-',  # Continue interrupted downloads
-            '--max-time', '3600',  # 1 hour timeout
-            '-o', file_local,
-            url
-        ]
-        
-        result = subprocess.run(cmd, capture_output=False, text=True)
-        
-        if result.returncode == 0 and os.path.exists(file_local):
-            print(f"✓ Download with curl successful")
-            return True
-        return False
-    except Exception as e:
-        print(f" Error with curl: {e}")
-        return False
+        subprocess.run(
+            ["tabix", "-f", "-p", "vcf", str(file_local)],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+        print("✓ Index created successfully")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        print(f" Error creating index: {exc}")
+        remove_partial()
+        return None
+    return file_local
+
+
+def has_chr_prefix(vcf_path):
+    """Return whether the first record uses 'chr' chromosome names."""
+    with pysam.VariantFile(str(vcf_path)) as vcf:
+        first = next(iter(vcf), None)
+    return first is not None and first.chrom.startswith("chr")
+
+
+def write_without_chr_prefix(vcf_in, vcf_out):
+    """Write a BGZF VCF with dbSNP-style chromosome names (chr1→1, chrM→MT)."""
+    def new_name(chrom):
+        name = chrom[3:] if chrom.startswith("chr") else chrom
+        return "MT" if name == "M" else name
+
+    with gzip.open(vcf_in, "rt") as source, pysam.BGZFile(str(vcf_out), "w") as destination:
+        for line in source:
+            if line.startswith("##contig=<ID="):
+                head, rest = line.split("ID=", 1)
+                name, separator, tail = rest.partition(",") if "," in rest else rest.partition(">")
+                line = f"{head}ID={new_name(name)}{separator}{tail}"
+            elif not line.startswith("#"):
+                parts = line.rstrip("\n").split("\t")
+                parts[0] = new_name(parts[0])
+                line = "\t".join(parts) + "\n"
+            destination.write(line.encode("utf-8"))
+
 
 def anotate_rsid_correct_final(vcf_file, dbsnp_file, output_dir):
-    """
- Annotate RS IDs without duplicating files
-    """
+    """Annotate rsIDs from dbSNP, returning output path or None."""
     base_name = os.path.basename(vcf_file)
-    
-    # Verification 1: If the input file is already annotated, skip it
-    if '_annotated' in base_name:
+    if "_annotated" in base_name:
         print(f" File already annotated in the input, skipping: {base_name}")
         return None
-    
-    # Build output name
-    if base_name.endswith('.pass.recode.vcf.gz'):
-        output_name = base_name.replace('.pass.recode.vcf.gz', '_annotated.vcf.gz')
+
+    if base_name.endswith(".pass.recode.vcf.gz"):
+        output_name = base_name.replace(".pass.recode.vcf.gz", "_annotated.vcf.gz")
     else:
-        output_name = base_name.replace('.vcf.gz', '_annotated.vcf.gz')
-    
-    output_file = str(Path(output_dir) / output_name)
-    
-    # Verification 2: If the annotated file already exists in vcf_annotated/, skip it
-    if os.path.exists(output_file):
+        output_name = base_name.replace(".vcf.gz", "_annotated.vcf.gz")
+    output_file = Path(output_dir) / output_name
+    if output_file.exists():
         print(f" Annotated file already exists: {output_name}")
-        return output_file
-    
+        return str(output_file)
+
+    print(f" Annotating {base_name}...")
+    source = str(vcf_file)
+    tmp_source = Path(output_dir) / (base_name + ".tmp_nochr.vcf.gz")
     try:
-        print(f" Annotating {base_name}...")
-        
-        tbi_file = vcf_file + '.tbi'
-        
-        if not os.path.exists(tbi_file):
-            print(f" Creating index for {base_name}...")
-            subprocess.run(['tabix', '-p', 'vcf', vcf_file],
-                         check=True, capture_output=True, text=True)
-        
-        cmd = [
-            'bcftools', 'annotate',
-            '-a', dbsnp_file,
-            '-c', 'ID',
-            '-o', output_file,
-            '-O', 'z',
-            vcf_file
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        
+        if has_chr_prefix(vcf_file):
+            print(" Chromosomes have 'chr' prefix; making a temporary dbSNP-compatible copy")
+            write_without_chr_prefix(vcf_file, tmp_source)
+            source = str(tmp_source)
+        subprocess.run(["tabix", "-f", "-p", "vcf", source], check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["bcftools", "annotate", "-a", str(dbsnp_file), "-c", "ID", "-O", "z",
+             "-o", str(output_file), source],
+            check=True, capture_output=True, text=True,
+        )
         print(f" Annotation completed: {output_name}")
-        
-        try:
-            subprocess.run(['tabix', '-p', 'vcf', output_file],
-                         check=True, capture_output=True, text=True)
-            print(f" Index created: {output_name}.tbi")
-        except Exception as e:
-            print(f" Could not create index for file annotated: {e}")
-        
-        return output_file
-        
-    except subprocess.CalledProcessError as e:
-        print(f" Error running bcftools: {e.stderr}")
-        return None
-    except Exception as e:
-        print(f" Unexpected error: {e}")
-        return None
+        subprocess.run(["tabix", "-f", "-p", "vcf", str(output_file)], check=True,
+                       capture_output=True, text=True)
+        print(f" Index created: {output_name}.tbi")
+        return str(output_file)
+    except subprocess.CalledProcessError as exc:
+        print(f" Error running {exc.cmd[0]}: {exc.stderr}")
+    except (OSError, ValueError) as exc:
+        print(f" Unexpected error: {exc}")
+    finally:
+        for leftover in (tmp_source, Path(str(tmp_source) + ".tbi")):
+            if leftover.exists():
+                leftover.unlink()
+
+    if output_file.exists():
+        output_file.unlink()
+    return None
+
+
+def find_build_of_file(vcf_name, builds_dict):
+    """Find a VCF build by exact file name, or by sample ID before the first underscore."""
+    if vcf_name in builds_dict:
+        return builds_dict[vcf_name]
+    sample_id = vcf_name.split("_")[0]
+    for name, build in builds_dict.items():
+        if name.split("_")[0] == sample_id:
+            return build
+    return None
 
 
 def anotate_all_with_dbsnp_correct(input_dir=None, output_dir=None, file_builds=None):
-    """
- Annotate the files using the correct dbSNP file according to the genome build
-    """
-    if input_dir is None:
-        input_dir = BASE_DIR / "vcf_files"
-    if output_dir is None:
-        output_dir = BASE_DIR / "vcf_annotated"
-    if file_builds is None:
-        file_builds = BASE_DIR / "vcf_builds.txt"
+    """Annotate VCFs with dbSNP matching each known genome build; return failures."""
+    input_dir = Path(input_dir) if input_dir is not None else BASE_DIR / "vcf_files"
+    output_dir = Path(output_dir) if output_dir is not None else BASE_DIR / "vcf_annotated"
+    file_builds = Path(file_builds) if file_builds is not None else BASE_DIR / "vcf_builds.txt"
 
     print("Starting Annotation With dbSNP according to genome build")
-    print("="*60)
-    
-    # Check that exists the folder of input
-    if not os.path.exists(input_dir):
+    print("=" * 60)
+    if not input_dir.exists():
         print(f" The folder '{input_dir}' does not exist")
-        print(f"Path searched: {os.path.abspath(input_dir)}")
-        print(f"\n Folders available in the current directory:")
-        for item in os.listdir('.'):
-            if os.path.isdir(item):
-                print(f" - {item}")
         return None
-    
-    # Read file vcf_builds.txt
+
     builds_dict = read_vcf_builds(file_builds)
-    
     if not builds_dict:
-        print(" Could not read the file vcf_builds.txt o is empty")
+        print(" Could not read vcf_builds.txt or it is empty")
         return None
-    
-    # Create folder output
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        print(f"✓ Folder output created: {output_dir}")
-    
-    # Search files VCF
-    try:
-        all_files = os.listdir(input_dir)
-    except Exception as e:
-        print(f" Error while reading the folder {input_dir}: {e}")
-        return None
-    
-    files_vcf = []
-    for f in all_files:
-        if f.endswith('.vcf.gz') and '_annotated' not in f:
-            files_vcf.append(f)
-    
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    files_vcf = sorted(
+        name for name in os.listdir(input_dir)
+        if name.endswith(".vcf.gz") and "_annotated" not in name
+    )
     if not files_vcf:
-        print(f" No found files .vcf.gz in the folder '{input_dir}'")
+        print(f" No .vcf.gz files found in '{input_dir}'")
         return None
-    
-    print(f"✓ Found {len(files_vcf)} files VCF")
-    
-    # Group files by build
+
+    print(f"✓ Found {len(files_vcf)} VCF files")
     files_by_build = {}
     files_without_build = []
-    
     for vcf_file in files_vcf:
-        if vcf_file in builds_dict:
-            build = builds_dict[vcf_file]
-            if build not in files_by_build:
-                files_by_build[build] = []
-            files_by_build[build].append(vcf_file)
+        build = find_build_of_file(vcf_file, builds_dict)
+        if build in URLS_DBSNP:
+            files_by_build.setdefault(build, []).append(vcf_file)
         else:
-            files_without_build.append(vcf_file)
-    
+            files_without_build.append((vcf_file, build))
+
     if files_without_build:
-        print(f"\n Warning: {len(files_without_build)} files not found in vcf_builds.txt:")
-        for vcf in files_without_build[:5]:
-            print(f" - {vcf}")
+        print(f"\n Warning: {len(files_without_build)} files without a known build (skipped):")
+        for vcf_file, build in files_without_build[:5]:
+            print(f" - {vcf_file} (build: {build or 'not in vcf_builds.txt'})")
         if len(files_without_build) > 5:
             print(f" ... and {len(files_without_build) - 5} more")
-    
-    # Process each build
-    for build, vcf_files in files_by_build.items():
-        print(f"\n{'='*60}")
-        print(f"Processing {len(vcf_files)} files with build {build}")
-        
-        # Download dbSNP for this build
-        dbsnp_file = download_dbsnp_by_build(build)
-        
-        if not dbsnp_file:
-            print(f" Could not download dbSNP for {build}, skipping these files")
-            continue
-        
-        # Annotate each VCF file with the corresponding dbSNP
-        for i, vcf_file in enumerate(vcf_files, 1):
-            print(f"\n[{i}/{len(vcf_files)}] Processing: {vcf_file}")
-            vcf_path = str(Path(input_dir) / vcf_file)
-            anotate_rsid_correct_final(vcf_path, dbsnp_file, output_dir)
-    
-    print("\n" + "="*60)
-    print("✓ Annotation completed")
-    return True
 
-# Execute with the correct folder
-anotate_all_with_dbsnp_correct()
+    failed = 0
+    for build, vcf_files in files_by_build.items():
+        print(f"\n{'=' * 60}\nProcessing {len(vcf_files)} files with build {build}")
+        dbsnp_file = download_dbsnp_by_build(build)
+        if not dbsnp_file:
+            print(f" Could not get dbSNP for {build}, skipping these files")
+            failed += len(vcf_files)
+            continue
+        for index, vcf_file in enumerate(vcf_files, 1):
+            print(f"\n[{index}/{len(vcf_files)}] Processing: {vcf_file}")
+            vcf_path = input_dir / vcf_file
+            if anotate_rsid_correct_final(str(vcf_path), dbsnp_file, output_dir) is None:
+                failed += 1
+
+    print(f"\n✓ Annotation completed | files not annotated: {failed}")
+    return failed
+
+
+if __name__ == "__main__":
+    result = anotate_all_with_dbsnp_correct()
+    if result is None or result > 0:
+        sys.exit(1)

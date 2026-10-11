@@ -9,6 +9,7 @@ import re
 import os
 import glob
 from collections import Counter
+from functools import lru_cache
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 BASE_DIR = Path(__file__).parent.parent
@@ -89,7 +90,30 @@ def group_files_by_build(files):
     return files_by_build
 
 
-NCBI_API_KEY = "" #Get your API key from https://www.ncbi.nlm.nih.gov/account/settings/ and set it here for faster processing (optional)
+NCBI_API_KEY = ""  # Set an NCBI API key here for a higher request rate (optional).
+
+
+@lru_cache(maxsize=100_000)
+def _fetch_refsnp(rsid_clean):
+    """Fetch and cache a dbSNP record; retry transient errors with backoff."""
+    url = f"https://api.ncbi.nlm.nih.gov/variation/v0/refsnp/{rsid_clean}"
+    headers = {"api-key": NCBI_API_KEY} if NCBI_API_KEY and NCBI_API_KEY != "YOUR_API_KEY_HERE" else {}
+    for attempt in range(1, 5):
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt < 4:
+                    sleep(2 ** (attempt - 1))
+                    continue
+                return None
+            if response.status_code != 200:
+                return None
+            return response.json()
+        except requests.RequestException:
+            if attempt == 4:
+                return None
+            sleep(2 ** (attempt - 1))
+    return None
 
 # ============================================================================
 # Get Frequencies ALFA Via API
@@ -100,19 +124,10 @@ def obtain_european_frequency_studies(rsid, effect_allele):
     else:
         rsid_clean = rsid
     
-    url = f"https://api.ncbi.nlm.nih.gov/variation/v0/refsnp/{rsid_clean}"
-    
-    headers = {}
-    if NCBI_API_KEY and NCBI_API_KEY != "YOUR_API_KEY_HERE":
-        headers['api-key'] = NCBI_API_KEY
-    
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
+        data = _fetch_refsnp(rsid_clean)
+        if data is None:
             return None
-        
-        data = response.json()
         primary = data.get('primary_snapshot_data', {})
         allele_annotations = primary.get('allele_annotations', [])
         
@@ -194,19 +209,10 @@ def obtain_gnomad_european_frequency(rsid, effect_allele):
     else:
         rsid_clean = rsid
     
-    url = f"https://api.ncbi.nlm.nih.gov/variation/v0/refsnp/{rsid_clean}"
-    
-    headers = {}
-    if NCBI_API_KEY and NCBI_API_KEY != "YOUR_API_KEY_HERE":
-        headers['api-key'] = NCBI_API_KEY
-    
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
+        data = _fetch_refsnp(rsid_clean)
+        if data is None:
             return None
-        
-        data = response.json()
         primary = data.get('primary_snapshot_data', {})
         allele_annotations = primary.get('allele_annotations', [])
         
@@ -263,19 +269,10 @@ def obtain_fallback_global_frequency(rsid, effect_allele):
     else:
         rsid_clean = rsid
     
-    url = f"https://api.ncbi.nlm.nih.gov/variation/v0/refsnp/{rsid_clean}"
-    
-    headers = {}
-    if NCBI_API_KEY and NCBI_API_KEY != "YOUR_API_KEY_HERE":
-        headers['api-key'] = NCBI_API_KEY
-    
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
+        data = _fetch_refsnp(rsid_clean)
+        if data is None:
             return None
-        
-        data = response.json()
         primary = data.get('primary_snapshot_data', {})
         allele_annotations = primary.get('allele_annotations', [])
         
@@ -325,7 +322,13 @@ def verify_and_obtain_frequencies(df, max_test=None):
     Main function for checking/getting ALFA frequencies 
     """
     print(f"\n{'='*80}")
-    print(f"Verification And Frequencies Retrieval - EUROPEAN STUDIES")
+    print("Verification And Frequencies Retrieval - EUROPEAN STUDIES")
+    required = {"rsID", "effect_allele", "af_european", "af_source"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"Frequency input is missing required columns: {sorted(missing)}")
+    df = df.copy()
+    df["af_european"] = pd.to_numeric(df["af_european"], errors="coerce")
     
     with_freq = df[df['af_european'].notna()].copy()
     without_freq = df[df['af_european'].isna()].copy()
@@ -489,7 +492,7 @@ def verify_and_obtain_frequencies(df, max_test=None):
     print(f"\n✓ Cleanup completed:")
     print(f" Variants before: {before_cleanup}")
     print(f" Variants after: {after_cleanup}")
-    print(f" Removed: {removed_total} ({removed_total/before_cleanup*100:.1f}%)")
+    print(f" Removed: {removed_total} ({removed_total/(before_cleanup or 1)*100:.1f}%)")
     
     # Update counters in results
     results['removed_without_data'] = len(variants_without_data)
@@ -578,10 +581,14 @@ def process_frequencies_multiple_studies(*files_tsv, max_test=None, destination_
         
         # 3. Save
         author_clean = re.sub(r'[^\w\s-]', '', author).replace(' ', '_')
-        out_file = str(Path(destination_folder) / f'{author_clean}_{build}_with_frequencies_{timestamp}.tsv')
-        
+        pgs_id_clean = re.sub(r'[^\w-]', '', pgs_id) or f'PGS{i:06d}'
+        out_file = str(Path(destination_folder) / f'{pgs_id_clean}_{author_clean}_{build}_with_frequencies.tsv')
+        for old_file in Path(destination_folder).glob("*.tsv"):
+            if old_file != Path(out_file) and read_metadata_file(old_file).get("PGS_ID") == pgs_id:
+                old_file.unlink()
+
         # Save with metadata in header
-        with open(out_file, 'w') as f:
+        with open(out_file, 'w', encoding='utf-8') as f:
             # Write metadata
             for key, value in metadata.items():
                 f.write(f"#{key}={value}\n")
@@ -599,8 +606,9 @@ def process_frequencies_multiple_studies(*files_tsv, max_test=None, destination_
         with_freq = df_final['af_european'].notna().sum()
         without_freq = df_final['af_european'].isna().sum()
         
-        print(f" With frequency: {with_freq} ({with_freq/len(df_final)*100:.1f}%)")
-        print(f" Without frequency: {without_freq} ({without_freq/len(df_final)*100:.1f}%)")
+        denominator = len(df_final) or 1
+        print(f" With frequency: {with_freq} ({with_freq/denominator*100:.1f}%)")
+        print(f" Without frequency: {without_freq} ({without_freq/denominator*100:.1f}%)")
         
         if 'verified_correctly' in results:
             print(f" Verified OK: {results['verified_correctly']}")
@@ -644,13 +652,14 @@ def process_frequencies_multiple_studies(*files_tsv, max_test=None, destination_
     for res in global_results['study_results']:
         total_variants += res['total_variants']
         total_with_freq += res['with_frequency']
+        denominator = res['total_variants'] or 1
         print(f" Study {res['study']} ({res['build']}): {res['total_variants']} variants, "
               f"{res['with_frequency']} with frequency "
-              f"({res['with_frequency']/res['total_variants']*100:.1f}%)")
+              f"({res['with_frequency']/denominator*100:.1f}%)")
     
     print(f"\nTOTAL COMBINED:")
     print(f" Variants: {total_variants}")
-    print(f" With european frequency : {total_with_freq} ({total_with_freq/total_variants*100:.1f}%)")
+    print(f" With european frequency : {total_with_freq} ({total_with_freq/(total_variants or 1)*100:.1f}%)")
     print("✓ PROCESS COMPLETED")
     
     return processed_studies, global_results
@@ -666,6 +675,7 @@ if __name__ == "__main__":
     if not files:
         print("\n❌ No normalized files found in 01_normalized_pgs")
         print(" You should previously run the normalization script")
+        sys.exit(1)
     else:
         # Group by build
         files_by_build = group_files_by_build(files)
@@ -696,21 +706,17 @@ if __name__ == "__main__":
                 'results': global_results
             }
         
-        # Process files with build unknown (if exist)
+        # Unknown-build files are not processed, preventing metadata gaps from flowing downstream.
         files_build_unknown = files_by_build.get('unknown', [])
         if files_build_unknown:
-            
-            studies_build_unknown, results_build_unknown = process_frequencies_multiple_studies(
-                *files_build_unknown,
-                max_test=None, # None = procesar todas las variantes
-                destination_folder=BASE_DIR / "02_with_frequencies" / "unknown"
-            )
-            
-            results_all_builds['unknown'] = {
-                'studies': studies_build_unknown,
-                'results': results_build_unknown
-            }
-        
+            print(f"\n⚠️ Skipping {len(files_build_unknown)} file(s) with unknown genome build:")
+            for file_path in files_build_unknown:
+                print(f" - {os.path.basename(file_path)}")
+
+        if not results_all_builds:
+            print("❌ No files with a known genome build were processed.")
+            sys.exit(1)
+
         # FINAL SUMMARY Of All The Builds
 
         for build, data in results_all_builds.items():
@@ -721,7 +727,7 @@ if __name__ == "__main__":
             total_var = sum(res['total_variants'] for res in data['results']['study_results'])
             total_freq = sum(res['with_frequency'] for res in data['results']['study_results'])
             print(f" Total variants: {total_var}")
-            print(f" With frequency: {total_freq} ({total_freq/total_var*100:.1f}%)")
+            print(f" With frequency: {total_freq} ({total_freq/(total_var or 1)*100:.1f}%)")
         print(f"\n{'='*80}")
         print("✅ FULL PIPELINE FINISHED")
         print(f"{'='*80}")

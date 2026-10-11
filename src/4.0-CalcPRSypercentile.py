@@ -11,6 +11,8 @@ from datetime import datetime
 from collections import Counter
 from itertools import combinations
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
+from risk_levels import classify_risk
 BASE_DIR = Path(__file__).parent.parent
 
 # ==============================================================================
@@ -48,59 +50,31 @@ def get_ukid_from_vcf(path_obj: Path) -> str:
 # Functions For Reading Builds
 
 def read_vcf_builds(file_builds=VCF_BUILDS_FILE):
+    """Read the tab-separated build file and return {sample_id: build}.
+
+    Matching by the sample ID avoids partial collisions (for example, ``uk1`` and ``uk10``).
     """
-    Reads vcf_builds.txt and returns a simple dictionary {base_name: build}
-    """
-    vcf_builds = {}
-    
     if not os.path.exists(file_builds):
         return None
-    
-    with open(file_builds, 'r') as f:
-        lines = f.readlines()
-    
-    # Find the split line
-    start_idx = 0
-    for i, line in enumerate(lines):
-        if line.startswith('==='):
-            start_idx = i + 1
-            break
-    
-    # Read data after the slit line
-    for line in lines[start_idx:]:
-        if line.strip():
-            parts = line.strip().split()
-            if len(parts) >= 2:
-                vcf_name = parts[0]
-                build = parts[1]
-                
-                base_name = vcf_name.split('.')[0]
-                
-                vcf_builds[base_name] = build
-                print(f" {base_name} → {build}")
-    
-    print(f"✓ Read {len(vcf_builds)} entries")
+
+    vcf_builds = {}
+    with open(file_builds, "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != 2 or parts[0] in ("", "File") or set(parts[0]) == {"="}:
+                continue
+            sample_id = get_ukid_from_vcf(Path(parts[0].strip()))
+            vcf_builds[sample_id] = parts[1].strip()
+
+    print(f"✓ Read {len(vcf_builds)} entries from {Path(file_builds).name}")
     return vcf_builds
 
 
 def obtain_build_vcf(vcf_path, vcf_builds_dict):
-    """
-    Gets the build of un VCF searching by the base name
-    """
+    """Return the build for a VCF by exact sample ID, or None if unknown."""
     if not vcf_builds_dict:
         return None
-    
-    vcf_filename = vcf_path.name
-    base_name = vcf_filename.split('_')[0].split('.')[0]
-    
-    if base_name in vcf_builds_dict:
-        return vcf_builds_dict[base_name]
-    
-    for key in vcf_builds_dict.keys():
-        if key in vcf_filename or vcf_filename.startswith(key):
-            return vcf_builds_dict[key]
-    
-    return None
+    return vcf_builds_dict.get(get_ukid_from_vcf(Path(vcf_path)))
 
 def extract_author_pgs(filepath):
     """
@@ -136,7 +110,7 @@ def read_metadata_pgs(file_pgs):
                         metadata[key] = value
                 else:
                     break
-    except:
+    except OSError:
         pass
     
     return metadata
@@ -194,31 +168,36 @@ class PGSLoader:
         self.pgs_dict = {}
         
         self.SYNONYMS = {
-            'rsID': ['rsid', 'snp', 'variant_id', 'hm_rsid', 'markername', 'id'],
-            'ea':   ['effect_allele', 'a1', 'risk_allele', 'alt', 'ea', 'reference_allele'],
-            'beta': ['beta', 'effect_weight', 'weight', 'log_odds', 'b', 'beta_eur', 'weights'],
-            'or':   ['or', 'odds_ratio', 'odds-ratio'],
-            'eaf':  ['eaf', 'frq', 'freq', 'maf', 'effect_allele_frequency', 'ref_allele_frequency', 'af', 'af_european']
+            'rsID': ['rsid', 'hm_rsid', 'variant_id', 'snp', 'markername', 'id'],
+            'ea':   ['effect_allele', 'hm_effect_allele', 'risk_allele', 'a1', 'ea', 'alt'],
+            'beta': ['effect_weight', 'beta', 'beta_eur', 'log_odds', 'weight', 'weights', 'b'],
+            'or':   ['odds_ratio', 'odds-ratio', 'or'],
+            'eaf':  ['af_european', 'allelefrequency_effect_european', 'allelefrequency_effect_eur',
+                    'effect_allele_frequency', 'eaf', 'frequency', 'freq', 'frq', 'af']
         }
 
     def _detect_column(self, columns, target_key):
         synonyms = self.SYNONYMS.get(target_key, [])
-        # 1) Exact match (case-insensitive)
-        for col in columns:
-            if col.lower() in synonyms:
-                return col
-        # 2) Whole-token match: a synonym must be a full token of the column name
-        #    (e.g. 'af' matches 'af_european', but 'ea' must NOT match 'european' or 'beta')
-        for col in columns:
-            tokens = re.split(r'[_\-.\s]+', col.lower())
-            for syn in synonyms:
-                if syn in tokens:
+        lowered = {col: str(col).lower() for col in columns}
+        # Match the most specific known name first, independent of file column order.
+        for synonym in synonyms:
+            for col in columns:
+                if lowered[col] == synonym:
+                    return col
+        # Fall back to complete tokens, never substring matches (e.g. 'ea' != 'beta').
+        broad_frequency_names = {'af', 'freq', 'frequency', 'frq'}
+        for synonym in synonyms:
+            if target_key == 'eaf' and synonym in broad_frequency_names:
+                continue
+            for col in columns:
+                tokens = re.split(r'[_\-.\s]+', lowered[col])
+                if synonym in tokens:
                     return col
         return None
 
     def load(self):
         try:
-            self.df = pd.read_csv(self.filepath, sep=None, engine='python', comment='#')
+            self.df = pd.read_csv(self.filepath, sep='\t', comment='#')
         except Exception as e:
             print(f" ✗ Error reading {os.path.basename(self.filepath)}: {e}")
             return None
@@ -250,106 +229,116 @@ class PGSLoader:
 
         data = self.df[list(col_map.values())].copy()
         data.columns = list(col_map.keys())
-        data.dropna(inplace=True)
-        
+        data['beta'] = pd.to_numeric(data['beta'], errors='coerce')
+        data['eaf'] = pd.to_numeric(data['eaf'], errors='coerce')
+        data['rsID'] = data['rsID'].astype('string').str.strip()
+        data['ea'] = data['ea'].astype('string').str.strip()
+        data.dropna(subset=['rsID', 'ea', 'beta', 'eaf'], inplace=True)
+        data = data[(data['rsID'] != '') & (data['ea'] != '') & data['eaf'].between(0, 1)].copy()
+
         if is_odds_ratio:
+            # log(OR) is only defined for finite positive odds ratios.
+            data = data[np.isfinite(data['beta']) & (data['beta'] > 0)].copy()
             data['beta'] = np.log(data['beta'])
 
-        self.pgs_dict = data.set_index('rsID').to_dict('index')
+        data = data[np.isfinite(data['beta'])].copy()
+        self.pgs_dict = data.drop_duplicates(subset=['rsID'], keep='first').set_index('rsID').to_dict('index')
         return self.pgs_dict
 
 # ==============================================================================
 # CALCULATION Functions
 
 def get_dosage(gt_str, ref, alt, effect_allele):
-    if '.' in gt_str or gt_str is None: return None
-    
-    parts = gt_str.replace('|', '/').split('/')
+    """Count effect-allele copies in a diploid or haploid GT, including multiallelic ALT."""
+    if not gt_str:
+        return None
+    raw_alleles = gt_str.replace('|', '/').split('/')
+    if any(allele in ('.', '') for allele in raw_alleles):
+        return None
     try:
-        alleles = [int(p) for p in parts if p.isdigit()]
-    except:
+        indexes = [int(allele) for allele in raw_alleles]
+    except ValueError:
         return None
-    
-    if len(alleles) == 0: return None
-    sum_alt = sum(alleles)
-    
-    if effect_allele == alt:
-        return sum_alt
-    elif effect_allele == ref:
-        return 2 - sum_alt
-    else:
+
+    allele_list = [ref] + alt.split(',')
+    if any(index < 0 or index >= len(allele_list) for index in indexes):
         return None
+    if effect_allele not in allele_list:
+        return None
+    target = allele_list.index(effect_allele)
+    return sum(1 for allele_index in indexes if allele_index == target)
+
+
+def get_ploidy(gt_str):
+    """Return the number of alleles encoded in a non-missing GT field."""
+    return len(gt_str.replace('|', '/').split('/'))
+
 
 def calculate_prs_with_details(vcf_path, pgs_dict):
+    """Return (centred PRS, sum of variances, matches, matched variant records).
+
+    For genotype ploidy p, contribution = dosage*beta - p*EAF*beta and
+    variance = p*EAF*(1-EAF)*beta**2. Each rsID is counted at most once.
     """
-    Returns both the PRS and detailed information of each variant matched
-    """
-    open_func = gzip.open if vcf_path.endswith('.gz') else open
-    
-    total_score = 0
-    sum_sigma2 = 0
-    matches = 0
-    
-    # Save details of each variant matched
+    open_func = gzip.open if str(vcf_path).endswith('.gz') else open
+    total_score = 0.0
+    sum_sigma2 = 0.0
     matched_variants = []
-    
+    counted = set()
+
     try:
-        with open_func(vcf_path, 'rt') as f:
-            for line in f:
-                if line.startswith('#'): continue
-                
-                cols = line.strip().split('\t')
-                if len(cols) < 10: continue
-                
-                rsid = cols[2]
-                
-                if rsid in pgs_dict:
-                    chrom = cols[0]
-                    pos = cols[1]
-                    ref, alt = cols[3], cols[4]
-                    gt_data = cols[9].split(':')[0]
-                    
+        with open_func(vcf_path, 'rt') as handle:
+            for line in handle:
+                if line.startswith('#'):
+                    continue
+                cols = line.rstrip('\n').split('\t')
+                if len(cols) < 10:
+                    continue
+
+                chrom, pos, ref, alt = cols[0], cols[1], cols[3], cols[4]
+                gt_data = cols[9].split(':', 1)[0]
+                for rsid in cols[2].split(';'):
+                    if rsid in counted or rsid not in pgs_dict:
+                        continue
                     snp_info = pgs_dict[rsid]
                     dosage = get_dosage(gt_data, ref, alt, snp_info['ea'])
-                    
-                    if dosage is not None:
-                        matches += 1
-                        beta = snp_info['beta']
-                        eaf = snp_info['eaf']
-                        
-                        personal_score = dosage * beta
-                        mean_pop = 2 * eaf * beta
-                        contribution = personal_score - mean_pop
-                        
-                        total_score += contribution
-                        
-                        sigma2 = 2 * eaf * (1 - eaf) * (beta**2)
-                        sum_sigma2 += sigma2
-                        
-                        # Save information of the variant
-                        matched_variants.append({
-                            'rsID': rsid,
-                            'chr': chrom,
-                            'pos': int(pos),
-                            'ref': ref,
-                            'alt': alt,
-                            'effect_allele': snp_info['ea'],
-                            'dosage': dosage,
-                            'effect_weight': beta,
-                            'effect_weight_abs': abs(beta),
-                            'eaf': eaf,
-                            'personal_score': personal_score,
-                            'mean_population': mean_pop,
-                            'contribution_to_prs': contribution,
-                            'contribution_abs': abs(contribution),
-                            'genotype': gt_data
-                        })
+                    if dosage is None:
+                        continue
 
+                    beta = float(snp_info['beta'])
+                    eaf = float(snp_info['eaf'])
+                    if not math.isfinite(beta) or not math.isfinite(eaf) or not 0 <= eaf <= 1:
+                        continue
+                    ploidy = get_ploidy(gt_data)
+                    counted.add(rsid)
+                    personal_score = dosage * beta
+                    mean_pop = ploidy * eaf * beta
+                    contribution = personal_score - mean_pop
+                    total_score += contribution
+                    sum_sigma2 += ploidy * eaf * (1 - eaf) * beta ** 2
+                    matched_variants.append({
+                        'rsID': rsid,
+                        'chr': chrom,
+                        'pos': int(pos),
+                        'ref': ref,
+                        'alt': alt,
+                        'effect_allele': snp_info['ea'],
+                        'dosage': dosage,
+                        'ploidy': ploidy,
+                        'effect_weight': beta,
+                        'effect_weight_abs': abs(beta),
+                        'eaf': eaf,
+                        'personal_score': personal_score,
+                        'mean_population': mean_pop,
+                        'contribution_to_prs': contribution,
+                        'contribution_abs': abs(contribution),
+                        'genotype': gt_data,
+                    })
     except Exception as e:
         print(f" Error processing VCF: {e}")
         return None, None, 0, []
 
-    return total_score, sum_sigma2, matches, matched_variants
+    return total_score, sum_sigma2, len(matched_variants), matched_variants
 
 
 # ==============================================================================
@@ -1030,16 +1019,17 @@ def generate_discordances_report(df_overlap, df_distribution, df_unique, df_merg
 def process_all():
     print("="*80)
     print("PRS CALCULATION With Analysis Of Variants PIPELINE")
-    
+    for stale_file in Path(VARIANT_ANALYSIS_FOLDER).glob("*_all_matched_variants.csv"):
+        stale_file.unlink()
+
     # 1. Read builds
     vcf_builds_dict = read_vcf_builds()
     
-    if vcf_builds_dict is None:
-        print(f"⚠️ Could not read {VCF_BUILDS_FILE}, continuing without build filtering")
-        vcf_builds_dict = {}
-    else:
-        build_counter = Counter(vcf_builds_dict.values())
-        print(f" Distribution of builds: {dict(build_counter)}")
+    if not vcf_builds_dict:
+        print(f"❌ Could not read any sample builds from {VCF_BUILDS_FILE}; refusing cross-build PRS matching")
+        return False
+    build_counter = Counter(vcf_builds_dict.values())
+    print(f" Distribution of builds: {dict(build_counter)}")
     
     # 2. Find files
     vcf_files = list(Path(VCF_FOLDER).glob('*.vcf.gz')) + list(Path(VCF_FOLDER).glob('*.vcf'))
@@ -1049,11 +1039,11 @@ def process_all():
     
     if not vcf_files:
         print(f"✗ No VCFs found in: {VCF_FOLDER}")
-        return
-    
+        return False
+
     if not pgs_files:
         print(f"✗ No PGS found in: {PGS_FOLDER}")
-        return
+        return False
     
     print(f"\n Found:")
     print(f" • {len(vcf_files)} files VCF")
@@ -1096,11 +1086,9 @@ def process_all():
     valid_combinations = []
     
     for vcf_path, vcf_name, vcf_build in vcf_info:
-        if vcf_build is None:
-            print(f"\n {vcf_name}: Build unknown, it will be tried with all the PGS")
-            for pgs_build, pgs_list in pgs_per_build.items():
-                for pgs_path in pgs_list:
-                    valid_combinations.append((vcf_path, vcf_name, 'Unknown', pgs_path))
+        if vcf_build not in ('GRCh37', 'GRCh38'):
+            print(f"\n {vcf_name}: Build unknown/unsupported; skipping to prevent cross-build scoring")
+            continue
         else:
             pgs_list = pgs_per_build.get(vcf_build, [])
             
@@ -1115,8 +1103,8 @@ def process_all():
     print(f" Saving all the variants matched per analysis\n")
     
     if total == 0:
-        print(" No valid combinations found")
-        return
+        print(" No valid build-matched combinations found")
+        return False
     
     # 8. Process combinations
     counter = 0
@@ -1171,31 +1159,29 @@ def process_all():
         #print(f" sigma_trait: {math.sqrt(var_sum):.6f}")
         #print(f" z_score: {raw_score / math.sqrt(var_sum):.6f}")
         #print(f" percentile: {st.norm.cdf(raw_score / math.sqrt(var_sum)) * 100:.1f}%")  
-        mean_contrib = np.mean([v['contribution_to_prs'] for v in matched_variants])
-        print(f" mean_contribution_per_var: {mean_contrib:.6f}")
-        if n_vars == 0 or var_sum == 0:
-            print(f" ✗ No common variants found\n")
+        if n_vars == 0 or not math.isfinite(var_sum) or var_sum <= 0:
+            print(" ✗ No matched variants with non-zero population variance\n")
             results.append({
                 'VCF': vcf_name,
                 'VCF_Build': vcf_build,
                 'PGS': pgs_name,
-                'SNPs_matched': 0,
+                'SNPs_matched': n_vars,
                 'Z_Score': 'N/A',
                 'Percentile': 'N/A',
                 'Risk': 'N/A',
-                'Status': 'Without variantes'
+                'Status': 'No variants with usable variance'
             })
             continue
+
+        mean_contrib = np.mean([v['contribution_to_prs'] for v in matched_variants])
+        print(f" mean_contribution_per_var: {mean_contrib:.6f}")
         
         # Statistics
         sigma_trait = math.sqrt(var_sum)
         z_score = raw_score / sigma_trait
         percentile = st.norm.cdf(z_score) * 100
         
-        risk_level = "Average"
-        if percentile > 97: risk_level = "Very High"
-        elif percentile > 84: risk_level = "High"
-        elif percentile < 16: risk_level = "Low"
+        risk_level = classify_risk(percentile)
         
         print(f" ✓ {n_vars} SNPs | Z={z_score:.3f} | P{percentile:.1f} | {risk_level}")
         
@@ -1256,15 +1242,17 @@ def process_all():
     
     print("\n" + "="*80)
     print("PROCESSING COMPLETED")
-    print(f"✓ Analysis successful: {sum(1 for r in results if r['Status'] == 'OK')}/{total}")
+    successful_count = sum(1 for result in results if result['Status'] == 'OK')
+    print(f"✓ Analysis successful: {successful_count}/{total}")
     print(f"✓ Summary: {summary_path}")
     print(f"✓ Variants saved: {VARIANT_ANALYSIS_FOLDER}/")
     n_variant_files = len(list(Path(VARIANT_ANALYSIS_FOLDER).glob('*_all_matched_variants.csv')))
     print(f" └── {n_variant_files} files *_all_matched_variants.csv")
     print()
+    return successful_count > 0
 
 
 if __name__ == "__main__":
-    process_all()
+    if not process_all():
+        sys.exit(1)
 
-    

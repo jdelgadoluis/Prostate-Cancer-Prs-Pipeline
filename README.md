@@ -11,10 +11,10 @@ This pipeline processes VCF files from the Personal Genome Project UK (PGP-UK) a
     01_normalized_pgs/      Normalized PGS scores
     02_with_frequencies/    Variants annotated with allele frequencies
     03_prs_ready/           Filtered and ready-to-score variants
-    04_af0.01/              Variants filtered by AF > 0.01
-    05_final/               Final annotated TSV files (GRCh37 & GRCh38)
+    04_af0.01/              Variants annotated with gene / region type (step 3.5)
+    05_final/               Variants with European AF > 0.01 on chr 1-22 (step 3.6)
     src/                    All Python scripts
-    results_prs/            PRS results and visualizations
+    results_prs/            PRS results and visualizations (not versioned)
 
 ## Features
 
@@ -34,11 +34,16 @@ Dependencies: pandas, numpy, matplotlib, seaborn, scipy, requests, pysam, tqdm, 
 
 ## Usage
 
-Configure paths in config.py if needed (all paths are relative to the project root by default), then run scripts sequentially from codigos/:
+Run the whole pipeline from the repository root. It executes the scripts in `src/` in order and stops at the first error:
 
-    python3 codigos/1-init.py
-    python3 codigos/2.3-AnotacionVCF.py
-    python3 codigos/4.0-CalcPRSypercentil.py
+    python3 src/pipeline.py
+
+Paths are defined at the top of each script and are relative to the repository root (there is no `config.py`). Individual steps can also be run on their own, for example:
+
+    python3 src/2.3-VCFAnnotation.py
+    python3 src/4.0-CalcPRSypercentile.py
+
+External tools required by the steps: `bcftools` and `tabix` (htslib), and `wget` or `curl` for downloading dbSNP. Step `2.4-CheckGENES.py` is optional and queries the Ensembl REST API, so it needs internet access.
 
 ## Simple web app (upload `.vcf.gz` and run pipeline)
 

@@ -59,72 +59,71 @@ def ensembl_get_gene_info(symbol):
         return None
 
 
+# Priority used to label a variant when several features overlap it (most specific first)
+LABEL_PRIORITY = {"exon": 0, "utr": 1, "promoter": 2, "gene": 3}
+
+
 def build_regions_from_ensembl(gene_json, upstream_bp=2000):
     """
-    Builds genomic regions (promoter, exons, UTRs) from JSON of Ensembl
+    Builds the genomic intervals to query for a gene (gene body, promoter, exons, UTRs)
+    from the Ensembl JSON.
+    Returns merged query intervals {chrom, start, end, features}. 'features' keeps the
+    original (unmerged) features so each variant can be labelled by the feature it falls in.
     """
     if not gene_json:
         return []
-        
+
     chrom = gene_json["seq_region_name"]
     strand = gene_json["strand"]
     g_start = gene_json["start"]
     g_end = gene_json["end"]
-    
-    regions = [{"chrom": chrom, "start": g_start, "end": g_end, "label": "gene"}]
-    
+
+    features = [{"label": "gene", "start": g_start, "end": g_end}]
+
     canonical_tx = next(
-        (tx for tx in gene_json.get("Transcript", []) if tx.get("is_canonical")), 
+        (tx for tx in gene_json.get("Transcript", []) if tx.get("is_canonical")),
         None
     )
-    
+
     if not canonical_tx and gene_json.get("Transcript"):
         canonical_tx = gene_json["Transcript"][0]
-    
+
     if canonical_tx:
-        tx_start = canonical_tx["start"] if strand == 1 else canonical_tx["end"]
+        # Transcription start site (TSS): left end on the + strand, right end on the - strand
+        tss = canonical_tx["start"] if strand == 1 else canonical_tx["end"]
         if strand == 1:
-            p_start = max(1, tx_start - upstream_bp)
-            p_end = tx_start - 1
+            p_start = max(1, tss - upstream_bp)
+            p_end = tss - 1
         else:
-            p_start = canonical_tx["start"] + 1
-            p_end = canonical_tx["start"] + upstream_bp
-            
+            p_start = tss + 1
+            p_end = tss + upstream_bp
+
         if p_end >= p_start:
-            regions.append({
-                "chrom": chrom, "start": p_start, "end": p_end, "label": "promoter"
-            })
-        
+            features.append({"label": "promoter", "start": p_start, "end": p_end})
+
         for exon in canonical_tx.get("Exon", []):
-            regions.append({
-                "chrom": chrom, 
-                "start": exon["start"], 
-                "end": exon["end"], 
-                "label": "exon"
-            })
-        
+            features.append({"label": "exon", "start": exon["start"], "end": exon["end"]})
+
         for utr in canonical_tx.get("UTR", []):
-            regions.append({
-                "chrom": chrom, 
-                "start": utr["start"], 
-                "end": utr["end"], 
-                "label": "utr"
-            })
-    
-    regions_sorted = sorted(regions, key=lambda x: (x["chrom"], x["start"], x["end"]))
+            features.append({"label": "utr", "start": utr["start"], "end": utr["end"]})
+
+    # Merge overlapping/adjacent features into query intervals
     merged = []
-    
-    for reg in regions_sorted:
-        if (not merged or 
-            reg["chrom"] != merged[-1]["chrom"] or 
-            reg["start"] > merged[-1]["end"] + 1):
-            merged.append(reg.copy())
+    for feat in sorted(features, key=lambda f: (f["start"], f["end"])):
+        if not merged or feat["start"] > merged[-1]["end"] + 1:
+            merged.append({"chrom": chrom, "start": feat["start"], "end": feat["end"],
+                           "features": [feat]})
         else:
-            merged[-1]["end"] = max(merged[-1]["end"], reg["end"])
-            if merged[-1]["label"] != "promoter":
-                merged[-1]["label"] = "gene"
-                
+            merged[-1]["end"] = max(merged[-1]["end"], feat["end"])
+            merged[-1]["features"].append(feat)
+
     return merged
+
+
+def label_for_position(region, pos):
+    """Returns the most specific label of the features of 'region' that contain 'pos'."""
+    hits = [f["label"] for f in region["features"] if f["start"] <= pos <= f["end"]]
+    return min(hits, key=LABEL_PRIORITY.get) if hits else "gene"
 
 
 def fetch_regions_for_genes(genes):
@@ -165,7 +164,7 @@ def iterate_variants_in_regions(vcf_path, regions):
     for reg in regions:
         try:
             for v in vcf(f"{reg['chrom']}:{reg['start']}-{reg['end']}"):
-                yield v, reg["label"], sample_id
+                yield v, label_for_position(reg, v.POS), sample_id
         except:
             continue
 
@@ -367,7 +366,11 @@ def process_vcf(vcf_path, regions_by_gene, sample_id, batch_size=100):
 # ============================================================================
 def export_plot_data(df, sample_id):
     """Export data in formats for creating custom plots"""
-    
+
+    if df.empty:
+        print(f" No annotated variants for {sample_id}: no plot data exported")
+        return
+
     # 1. Count of variants by gene
     gene_counts = df['GENE'].value_counts().reset_index()
     gene_counts.columns = ['Gene', 'Count']

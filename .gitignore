@@ -205,3 +205,27 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ---------------------------------------------------------------------------
+# Project data: personal genomic data (VCF) and large intermediate/result files.
+# Do NOT commit participant genomes or per-person results.
+# ---------------------------------------------------------------------------
+*.vcf
+*.vcf.gz
+*.tbi
+dbsnp_*.vcf.gz
+dbsnp_*.vcf.gz.tbi
+vcf_files/
+vcf_annotated/
+vcf_annotated_grch38/
+00_pgs_scores/
+01_normalized_pgs/
+02_with_frequencies/
+03_prs_ready/
+04_af0.01/
+05_final/
+results_prs/
+jobs/
+
+# macOS
+.DS_Store

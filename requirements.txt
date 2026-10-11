@@ -7,5 +7,4 @@ requests
 pysam
 tqdm
 cyvcf2
-
 streamlit
